@@ -1,0 +1,10 @@
+venv
+.idea
+
+*__pycache__*
+*.egg-info
+
+*data/
+certs/
+scripts/smart-sec-cam.service
+backend/build/

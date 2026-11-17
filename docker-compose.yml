@@ -1,0 +1,45 @@
+services:
+  redis:
+    image: "ghcr.io/scottbarnesg/smart-sec-cam/sec-cam-redis:latest"
+    build:
+      context: backend/smart_sec_cam/redis
+    ports:
+      - "6379:6379"
+      - "6380:6380"
+    restart: always
+  server:
+    image: "ghcr.io/scottbarnesg/smart-sec-cam/sec-cam-server:latest"
+    build:
+      context: .
+      dockerfile: backend/smart_sec_cam/server/Dockerfile
+    entrypoint: /backend/smart_sec_cam/server/docker-entrypoint.sh
+    volumes:
+      - ./data/:/backend/data/
+      - ./certs/:/backend/certs/
+    environment:
+      - API_URL=${API_URL}
+      - PYTHONUNBUFFERED=1
+      - ENABLE_REGISTRATION=0
+    ports:
+      - "8443:8443"
+    depends_on:
+      - redis
+    restart: always
+  motion-detection:
+    image: "ghcr.io/scottbarnesg/smart-sec-cam/sec-cam-motion:latest"
+    build:
+      context: backend/
+      dockerfile: smart_sec_cam/motion/Dockerfile
+    command: python smart_sec_cam/motion/main.py --redis-url redis --video-dir /backend/data/videos/
+    volumes:
+      - ./data/videos/:/backend/data/videos/
+    environment:
+      - PYTHONUNBUFFERED=1
+      - MOTION_THRESHOLD=10000
+    depends_on:
+      - redis
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 2G

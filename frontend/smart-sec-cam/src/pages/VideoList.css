@@ -1,0 +1,27 @@
+.VideoList {
+    background-color: white;
+    min-height: 100vh;
+    min-width: 100vw;
+}
+
+.videoContainer {
+    display:flex; 
+    flex-direction:row;
+}
+
+.videoPlayer {
+    width: 75%;
+}
+
+.videoList {
+    width: 25%;
+    max-height: 99vh;
+}
+
+.videoList ul {
+    list-style-type: none;
+}
+
+.NavBar {
+    width: 100%;
+}
