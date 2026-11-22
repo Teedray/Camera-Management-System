@@ -173,3 +173,82 @@ class AuthDatabase:
         cursor = self.conn.cursor()
         result = cursor.execute(f"SELECT Count() FROM {self.USER_TABLE}")
         return result.fetchone()[0]
+
+    def add_camera(self, camera_id, name, location, channel_name):
+        values = (camera_id, name, location, channel_name)
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in values
+        ):
+            raise ValueError("Camera fields must be non-empty strings")
+
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO cameras "
+                "(id, name, location, channel_name) "
+                "VALUES (?, ?, ?, ?)",
+                tuple(value.strip() for value in values)
+            )
+
+    def assign_camera(self, user_id, camera_id):
+        # Validate both records before granting access.
+        if self.get_user_by_id(user_id) is None:
+            raise ValueError("User does not exist")
+
+        camera = self.conn.execute(
+            "SELECT id FROM cameras WHERE id = ?",
+            (camera_id,)
+        ).fetchone()
+
+        if camera is None:
+            raise ValueError("Camera does not exist")
+
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO user_cameras (user_id, camera_id) "
+                "VALUES (?, ?) "
+                "ON CONFLICT(user_id, camera_id) DO NOTHING",
+                (user_id, camera_id)
+            )
+
+    def revoke_camera(self, user_id, camera_id):
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM user_cameras "
+                "WHERE user_id = ? AND camera_id = ?",
+                (user_id, camera_id)
+            )
+
+    def get_user_cameras(self, user_id):
+        rows = self.conn.execute(
+            "SELECT c.id, c.name, c.location, c.channel_name, c.enabled "
+            "FROM cameras c "
+            "JOIN user_cameras uc ON uc.camera_id = c.id "
+            "JOIN users u ON u.id = uc.user_id "
+            "WHERE u.id = ? AND c.enabled = 1 "
+            "ORDER BY c.name, c.id",
+            (user_id,)
+        ).fetchall()
+
+        return [
+            {
+                "id": row[0],
+                "name": row[1],
+                "location": row[2],
+                "channel_name": row[3],
+                "enabled": bool(row[4])
+            }
+            for row in rows
+        ]
+
+    def can_access_camera(self, user_id, camera_id):
+        row = self.conn.execute(
+            "SELECT 1 "
+            "FROM user_cameras uc "
+            "JOIN users u ON u.id = uc.user_id "
+            "JOIN cameras c ON c.id = uc.camera_id "
+            "WHERE u.id = ? AND c.id = ? AND c.enabled = 1",
+            (user_id, camera_id)
+        ).fetchone()
+
+        return row is not None
