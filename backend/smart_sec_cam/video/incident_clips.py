@@ -8,12 +8,14 @@ class IncidentClipManager:
     def __init__(
         self,
         video_dir="data/videos/",
-        archive_dir="data/incident_archive/"
+        archive_dir="data/incident_archive/",
+        authorization_check=None
     ):
         self.video_dir = Path(video_dir)
         self.archive_dir = Path(archive_dir)
         self.archive_dir.mkdir(parents=True, exist_ok=True)
-        self.incident_db = IncidentDatabase() 
+        self.incident_db = IncidentDatabase()
+        self.authorization_check = authorization_check 
 
     def validate_video(self, filename: str) -> bool:
         video_path = self.video_dir / filename
@@ -65,7 +67,12 @@ class IncidentClipManager:
         duration = frame_count / fps
         return duration
 
-    def save_incident_clip(self, filename, start_time, end_time):
+    def save_incident_clip(self, filename, start_time, end_time, user_id):
+
+        if not self.is_authorized(user_id):
+            print("Access denied: management authorization required")
+            return False
+            
         # Retrieve the video's duration
         video_duration = self.get_video_duration(filename)
 
@@ -184,4 +191,9 @@ class IncidentClipManager:
         print(f"Incident clip saved: {output_path}")
         print(f"Incident ID: {clip_id}")
         return True
-    
+
+    def is_authorized(self, user_id):
+        if self.authorization_check is None:
+            return False
+
+        return self.authorization_check(user_id) is True
