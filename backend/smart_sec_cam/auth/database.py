@@ -17,6 +17,7 @@ class AuthDatabase:
             os.makedirs(self.DATABASE_DIR)
         # Connect to the database
         self.conn = sqlite3.connect(os.path.join(self.DATABASE_DIR, self.db_name + self.FILE_TYPE))
+        self.conn.execute("PRAGMA foreign_keys = ON")
         self.setup()
 
     def setup(self):
@@ -26,6 +27,50 @@ class AuthDatabase:
             f"CREATE TABLE IF NOT EXISTS {self.USER_TABLE} "
             "(id, username, salt, hash)"
         )
+
+        columns = {
+            row[1]
+            for row in cursor.execute(
+                f"PRAGMA table_info({self.USER_TABLE})"
+            )
+        }
+
+        if "role" not in columns:
+            cursor.execute(
+                f"ALTER TABLE {self.USER_TABLE} "
+                "ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer' "
+                "CHECK (role IN ('administrator', 'manager', 'viewer'))"
+            )
+
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "idx_users_id_unique ON users(id)"
+        )
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cameras (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                location TEXT NOT NULL,
+                channel_name TEXT UNIQUE NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1
+                    CHECK (enabled IN (0, 1))
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_cameras (
+                user_id TEXT NOT NULL,
+                camera_id TEXT NOT NULL,
+                PRIMARY KEY (user_id, camera_id),
+                FOREIGN KEY (user_id)
+                    REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (camera_id)
+                    REFERENCES cameras(id) ON DELETE CASCADE
+            )
+        """)
+
+        self.conn.commit()
 
         columns = {
             row[1]
