@@ -35,27 +35,63 @@ class AuthDatabase:
                        (user.user_id, user.username, user.salt, user.password_hash))
         self.conn.commit()
 
-    def get_user_by_id(self, user_id: str) -> User:
+    def get_user_by_id(self, user_id: str):
         cursor = self.conn.cursor()
-        result = cursor.execute(f"SELECT * FROM {self.USER_TABLE} WHERE id = ?", (user_id,))
-        if result:
-            user_data = result.fetchone()
-            return User(user_data[1], user_data[0], user_data[2], user_data[3])
+        cursor.execute(
+            f"SELECT id, username, salt, hash "
+            f"FROM {self.USER_TABLE} WHERE id = ?",
+            (user_id,)
+        )
+        row = cursor.fetchone()
 
-    def get_user_by_username(self, username: str) -> User:
-        cursor = self.conn.cursor()
-        result = cursor.execute(f"SELECT * FROM {self.USER_TABLE} WHERE username= ?", (username,))
-        if result:
-            user_data = result.fetchone()
-            return User(user_data[0], user_data[1], user_data[2], user_data[3])
+        if row is None:
+            return None
 
-    def get_user_by_username_or_id(self, user_id: str, username: str) -> List[User]:
+        return User(
+            username=row[1],
+            user_id=row[0],
+            salt=row[2],
+            password_hash=row[3]
+        )
+
+    def get_user_by_username(self, username: str):
         cursor = self.conn.cursor()
-        users = []
-        for row in cursor.execute(f"SELECT * FROM {self.USER_TABLE} WHERE id = ? OR username = ?", (user_id, username)):
-            user = User(row[0], row[1], row[2], row[3])
-            users.append(user)
-        return users
+        cursor.execute(
+            f"SELECT id, username, salt, hash "
+            f"FROM {self.USER_TABLE} WHERE username = ?",
+            (username,)
+        )
+        row = cursor.fetchone()
+
+        if row is None:
+            return None
+
+        return User(
+            username=row[1],
+            user_id=row[0],
+            salt=row[2],
+            password_hash=row[3]
+        )
+
+    def get_user_by_username_or_id(
+        self, user_id: str, username: str
+    ) -> List[User]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            f"SELECT id, username, salt, hash "
+            f"FROM {self.USER_TABLE} WHERE id = ? OR username = ?",
+            (user_id, username)
+        )
+
+        return [
+            User(
+                username=row[1],
+                user_id=row[0],
+                salt=row[2],
+                password_hash=row[3]
+            )
+            for row in cursor.fetchall()
+        ]
 
     def get_num_users(self) -> int:
         cursor = self.conn.cursor()
