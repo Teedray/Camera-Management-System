@@ -328,3 +328,45 @@ class TestIncidentClips(unittest.TestCase):
         ).fetchone()[0]
 
         self.assertEqual(before_records, after_records)
+
+    def test_incident_title_and_notes(self):
+        title = "Suspicious Activity"
+        notes = "Individual entered through the front entrance."
+
+        result = self.manager.save_incident_clip(
+            self.filename,
+            1,
+            2,
+            "manager-001",
+            title=title,
+            notes=notes
+        )
+
+        self.assertTrue(result)
+
+        cursor = self.manager.incident_db.conn.cursor()
+        cursor.execute(
+            "SELECT id FROM incident_clips"
+        )
+
+        row = cursor.fetchone()
+        self.assertIsNotNone(row)
+
+        # Reopen the database to verify persistence
+        db_path = self.manager.incident_db.db_path
+        self.manager.incident_db.conn.close()
+
+        self.manager.incident_db = IncidentDatabase(
+            db_path=db_path
+        )
+
+        incident = self.manager.incident_db.get_incident(row[0])
+
+        self.assertIsNotNone(incident)
+        self.assertEqual(incident[6], title)
+        self.assertEqual(incident[7], notes)
+
+        # Confirm the archived video still exists
+        self.assertTrue(
+            (self.archive_dir / incident[1]).is_file()
+        )

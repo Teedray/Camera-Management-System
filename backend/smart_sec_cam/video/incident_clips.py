@@ -67,7 +67,7 @@ class IncidentClipManager:
         duration = frame_count / fps
         return duration
 
-    def save_incident_clip(self, filename, start_time, end_time, user_id):
+    def save_incident_clip(self, filename, start_time, end_time, user_id, title="", notes=""):
 
         if not self.is_authorized(user_id):
             print("Access denied: management authorization required")
@@ -180,7 +180,9 @@ class IncidentClipManager:
                 output_path.name,
                 Path(filename).stem.split("__")[0],
                 start_time,
-                end_time
+                end_time,
+                title,
+                notes
             )
 
         except Exception as error:

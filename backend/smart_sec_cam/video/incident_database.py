@@ -11,34 +11,55 @@ class IncidentDatabase:
 
 	def setup(self):
 		cursor = self.conn.cursor()
-
+		
 		cursor.execute("""
-			CREATE TABLE IF NOT EXISTS incident_clips ( 
-				id TEXT PRIMARY KEY,
-				filename TEXT NOT NULL,
-				camera TEXT NOT NULL,
-				start_time REAL NOT NULL,
-				end_time REAL NOT NULL,
-				incident_flag INTEGER NOT NULL DEFAULT 1 
-			)
-		""")
+            CREATE TABLE IF NOT EXISTS incident_clips (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                camera TEXT NOT NULL,
+                start_time REAL NOT NULL,
+                end_time REAL NOT NULL,
+                incident_flag INTEGER NOT NULL DEFAULT 1,
+                title TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT ''
+            )
+        """)
 
+        # Check existing columns
+		cursor.execute("PRAGMA table_info(incident_clips)")
+		columns = [row[1] for row in cursor.fetchall()]
+
+        # Add missing columns to existing databases
+		if "title" not in columns:
+			cursor.execute(
+                "ALTER TABLE incident_clips "
+                "ADD COLUMN title TEXT NOT NULL DEFAULT ''"
+            )
+			
+		if "notes" not in columns:
+			cursor.execute(
+                "ALTER TABLE incident_clips "
+                "ADD COLUMN notes TEXT NOT NULL DEFAULT ''"
+            )
+			
 		self.conn.commit()
 
-	def add_incident(self, clip_id, filename, camera, start_time, end_time):
+	def add_incident(self, clip_id, filename, camera, start_time, end_time, title="", notes=""):
 		cursor = self.conn.cursor()
 
 		cursor.execute("""
 			INSERT INTO incident_clips
-			(id, filename, camera, start_time, end_time, incident_flag)
-			VALUES (?, ?, ?, ?, ?, ?)
+			(id, filename, camera, start_time, end_time, incident_flag, title, notes)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		""", (
 			clip_id,
 			filename,
 			camera,
 			start_time,
 			end_time,
-			1
+			1,
+			title,
+			notes
 		))
 
 		self.conn.commit()
