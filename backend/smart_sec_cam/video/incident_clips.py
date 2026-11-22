@@ -2,6 +2,7 @@ import cv2
 from pathlib import Path
 from uuid import uuid4
 
+from smart_sec_cam.video.incident_database import IncidentDatabase
 
 class IncidentClipManager:
     def __init__(
@@ -12,6 +13,7 @@ class IncidentClipManager:
         self.video_dir = Path(video_dir)
         self.archive_dir = Path(archive_dir)
         self.archive_dir.mkdir(parents=True, exist_ok=True)
+        self.incident_db = IncidentDatabase() 
 
     def validate_video(self, filename: str) -> bool:
         video_path = self.video_dir / filename
@@ -162,5 +164,24 @@ class IncidentClipManager:
             print("Saved incident clip could not be verified")
             return False
 
+        # Save the incident information in SQLite
+        clip_id = uuid4().hex
+
+        try:
+            self.incident_db.add_incident(
+                clip_id,
+                output_path.name,
+                Path(filename).stem.split("__")[0],
+                start_time,
+                end_time
+            )
+
+        except Exception as error:
+            output_path.unlink(missing_ok=True)
+            print(f"Failed to save incident record: {error}")
+            return False
+
         print(f"Incident clip saved: {output_path}")
+        print(f"Incident ID: {clip_id}")
         return True
+    
