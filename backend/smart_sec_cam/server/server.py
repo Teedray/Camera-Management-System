@@ -8,7 +8,10 @@ import eventlet
 eventlet.monkey_patch()
 
 import jwt.exceptions
-from flask import Flask, send_from_directory, render_template, request
+from flask import (
+    Flask, send_from_directory, render_template,
+    request, g, jsonify
+)
 from flask_cors import CORS
 from flask_socketio import SocketIO, join_room
 
@@ -34,21 +37,26 @@ ENABLE_USER_REGISTRATION = False
 def require_token(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        token = None
-        # jwt is passed in the request header
-        if 'x-access-token' in request.headers:
-            token = request.headers['x-access-token']
-        client_ip_addr = request.remote_addr
-        # return 401 if token is not passed
+        token = request.headers.get("x-access-token")
+
         if not token:
-            return json.dumps({'status': "ERROR", "error": "Missing token"}), 401, {'ContentType': 'application/json'}
+            return jsonify(
+                status="ERROR",
+                error="Missing token"
+            ), 401
+
         try:
-            if not authenticator.validate_token(token, client_ip_addr):
-                return json.dumps({'status': "ERROR", "error": "Invalid token"}), 401, {'ContentType': 'application/json'}
-        except (jwt.exceptions.InvalidSignatureError, jwt.exceptions.DecodeError):
-            return json.dumps({'status': "ERROR", "error": "Invalid token"}), 401, {'ContentType': 'application/json'}
-        # returns the current logged in users contex to the routes
+            g.current_user = authenticator.get_authenticated_user(
+                token, request.remote_addr
+            )
+        except jwt.exceptions.InvalidTokenError:
+            return jsonify(
+                status="ERROR",
+                error="Invalid or expired token"
+            ), 401
+
         return f(*args, **kwargs)
+
     return decorated
 
 
@@ -209,6 +217,21 @@ def get_video(file_name: str):
     else:
         return json.dumps({'status': "ERROR"}), 404, {'ContentType': 'application/json'}
     return send_from_directory(VIDEO_DIR, file_name, as_attachment=True, mimetype=mime_type)
+
+@app.route("/api/v1/auth/me", methods=["GET"])
+@require_token
+def get_current_user():
+    user = g.current_user
+
+    return jsonify(
+        success=True,
+        data={
+            "id": user.user_id,
+            "username": user.username,
+            "role": user.role,
+            "cameras": auth_db.get_user_cameras(user.user_id)
+        }
+    ), 200
 
 
 def listen_for_images(redis_url: str, redis_port: int):

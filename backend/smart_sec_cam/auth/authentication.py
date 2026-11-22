@@ -7,7 +7,7 @@ from smart_sec_cam.auth.database import AuthDatabase
 
 
 class Authenticator:
-    JWT_SECRET_LENGTH = 24
+    JWT_SECRET_LENGTH = 32
     TOKEN_DURATION_HOURS = 1
 
     def __init__(self, auth_db: AuthDatabase):
@@ -49,3 +49,24 @@ class Authenticator:
             'client_ip': client_ip_addr
         }
         return jwt.encode(payload, self.secret, algorithm='HS256')
+    
+    def get_authenticated_user(self, token: str, client_ip_addr: str):
+        payload = jwt.decode(
+            token,
+            self.secret,
+            algorithms=["HS256"],
+            options={"require": ["exp", "sub", "client_ip"]}
+        )
+
+        if payload["client_ip"] != client_ip_addr:
+            raise jwt.InvalidTokenError("Client address mismatch")
+
+        user_id = payload["sub"]
+        if not isinstance(user_id, str) or not user_id:
+            raise jwt.InvalidTokenError("Invalid user identity")
+
+        user = self.auth_db.get_user_by_id(user_id)
+        if user is None:
+            raise jwt.InvalidTokenError("User no longer exists")
+
+        return user
