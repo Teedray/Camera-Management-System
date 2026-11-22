@@ -183,8 +183,24 @@ def refresh_token():
 @app.route("/api/video/rooms", methods=["GET"])
 @require_token
 def get_rooms():
-    global rooms
-    return json.dumps({'rooms': rooms}), 200, {'ContentType': 'application/json'}
+    cameras = auth_db.get_user_cameras(g.current_user.user_id)
+
+    permitted_rooms = set()
+    for camera in cameras:
+        channel = camera["channel_name"]
+        permitted_rooms.add(channel)
+
+        # Compatibility with the existing live-stream code,
+        # which converts Redis channel bytes using str().
+        permitted_rooms.add(str(channel.encode("utf-8")))
+
+    visible_rooms = {
+        room: last_seen
+        for room, last_seen in list(rooms.items())
+        if room in permitted_rooms
+    }
+
+    return jsonify(rooms=visible_rooms), 200
 
 
 @app.route("/api/video/video-list", methods=["GET"])
@@ -231,6 +247,16 @@ def get_current_user():
             "role": user.role,
             "cameras": auth_db.get_user_cameras(user.user_id)
         }
+    ), 200
+
+@app.route("/api/v1/cameras", methods=["GET"])
+@require_token
+def list_assigned_cameras():
+    cameras = auth_db.get_user_cameras(g.current_user.user_id)
+
+    return jsonify(
+        success=True,
+        data={"items": cameras}
     ), 200
 
 
