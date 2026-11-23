@@ -31,6 +31,7 @@ authenticator = Authenticator(auth_db)
 # Application-specific data
 VIDEO_DIR = "data/videos"
 rooms = {}
+live_subscriptions = {}
 ENABLE_USER_REGISTRATION = False
 
 
@@ -65,19 +66,49 @@ SocketIO endpoints
 """
 
 
-@socketio.on('join')
+@socketio.on("join")
 def on_join(data):
-    # Validate token
-    token = data['token']
-    client_ip_addr = request.remote_addr
+    if not isinstance(data, dict):
+        return {"status": "ERROR", "error": "Invalid request"}
+
+    token = data.get("token")
+    room = data.get("room")
+
+    if not isinstance(token, str) or not isinstance(room, str):
+        return {"status": "ERROR", "error": "Missing token or room"}
+
     try:
-        if not authenticator.validate_token(token, client_ip_addr):
-            return json.dumps({'status': "ERROR", "error": "Invalid token"})
-    except (jwt.exceptions.InvalidSignatureError, jwt.exceptions.DecodeError):
-        return json.dumps({'status': "ERROR", "error": "Invalid token"})
-    # Join room
-    room = data['room']
-    join_room(room)
+        user = authenticator.get_authenticated_user(
+            token, request.remote_addr
+        )
+    except jwt.exceptions.InvalidTokenError:
+        return {"status": "ERROR", "error": "Invalid or expired token"}
+
+    for camera in auth_db.get_user_cameras(user.user_id):
+        channel = camera["channel_name"]
+        if room in (channel, str(channel.encode("utf-8"))):
+            live_subscriptions[(request.sid, room)] = {
+                "token": token,
+                "ip": request.remote_addr,
+                "camera_id": camera["id"],
+                "channel_name": channel
+            }
+            return {"status": "OK"}
+
+    return {"status": "ERROR", "error": "Camera access denied"}
+
+
+@socketio.on("leave")
+def on_leave(data):
+    if isinstance(data, dict) and isinstance(data.get("room"), str):
+        live_subscriptions.pop((request.sid, data["room"]), None)
+
+
+@socketio.on("disconnect")
+def on_disconnect(reason=None):
+    for key in list(live_subscriptions):
+        if key[0] == request.sid:
+            live_subscriptions.pop(key, None)
 
 
 """
@@ -259,27 +290,68 @@ def list_assigned_cameras():
         data={"items": cameras}
     ), 200
 
+def deliver_live_frame(channel, image):
+    if isinstance(channel, bytes):
+        channel = channel.decode("utf-8")
+
+    if not isinstance(channel, str) or not isinstance(image, bytes):
+        return
+
+    encoded_image = None
+
+    for key, subscription in list(live_subscriptions.items()):
+        if subscription["channel_name"] != channel:
+            continue
+
+        try:
+            user = authenticator.get_authenticated_user(
+                subscription["token"], subscription["ip"]
+            )
+        except jwt.exceptions.InvalidTokenError:
+            live_subscriptions.pop(key, None)
+            continue
+
+        if not auth_db.can_access_camera(
+            user.user_id, subscription["camera_id"]
+        ):
+            live_subscriptions.pop(key, None)
+            continue
+
+        if encoded_image is None:
+            encoded_image = base64.b64encode(image).decode("utf-8")
+
+        sid, requested_room = key
+        socketio.emit(
+            "image",
+            {"room": requested_room, "data": encoded_image},
+            to=sid,
+            namespace="/"
+        )
 
 def listen_for_images(redis_url: str, redis_port: int):
-    global rooms
     image_receiver = RedisImageReceiver(redis_url, redis_port)
     image_receiver.set_channels(image_receiver.get_all_channels())
 
     while True:
-        # Check for new channels
         channel_list = image_receiver.get_all_channels()
         if channel_list != image_receiver.subscribed_channels:
             image_receiver.set_channels(channel_list)
-        # Directly check for new messages
-        new_message = image_receiver.get_new_message()
-        if new_message and image_receiver.subscribed_channels:
-            image = new_message.get("data")
-            room = str(new_message.get("channel"))
-            rooms[room] = time.time()
-            encoded_image = base64.b64encode(image).decode('utf-8')
-            socketio.emit('image', {'room': room, 'data': encoded_image}, room=room)
-        else:
-            eventlet.sleep(0.01)
+
+        message = image_receiver.get_new_message()
+
+        if message and message.get("type") == "message":
+            image = message.get("data")
+            channel = message.get("channel")
+
+            if isinstance(image, bytes) and isinstance(
+                channel, (str, bytes)
+            ):
+                # Preserve the existing frontend's room naming.
+                room = str(channel)
+                rooms[room] = time.time()
+                deliver_live_frame(channel, image)
+
+        eventlet.sleep(0.001)
 
 
 if __name__ == '__main__':
