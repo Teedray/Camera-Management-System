@@ -1,4 +1,5 @@
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,17 +20,19 @@ CAMERA = {
 }
 
 
-class AdminCameraApiTest(unittest.TestCase):
+class AdminApiTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         from contextlib import ExitStack
 
         with ExitStack() as cleanup:
             directory = cleanup.enter_context(tempfile.TemporaryDirectory())
+            already_loaded = "smart_sec_cam.server.server" in sys.modules
             with patch.object(AuthDatabase, "DATABASE_DIR", directory):
                 from smart_sec_cam.server import server
 
-            cleanup.callback(server.auth_db.conn.close)
+            if not already_loaded:
+                cleanup.callback(server.auth_db.conn.close)
             cls.server = server
             cls.addClassCleanup(cleanup.pop_all().close)
 
@@ -64,6 +67,8 @@ class AdminCameraApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, status_code, response.get_data(as_text=True))
         self.assertEqual(response.get_json()["error"], error)
 
+
+class AdminCameraApiTest(AdminApiTestCase):
     def register_camera(self):
         return self.client.post(
             CAMERAS_URL, json=CAMERA, headers=self.headers["administrator"]

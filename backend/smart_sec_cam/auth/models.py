@@ -4,6 +4,7 @@ import uuid
 
 
 class User:
+    ROLES = ("administrator", "manager", "viewer")
     SALT_LENGTH = 32
     HASH_ALGORITHM = 'sha256'
     PASSWORD_ENCODING = 'utf-8'
@@ -17,7 +18,7 @@ class User:
         password_hash: str = None,
         role: str = "viewer"
     ):
-        if role not in ("administrator", "manager", "viewer"):
+        if role not in self.ROLES:
             raise ValueError("Invalid user role")
 
         self.user_id = user_id

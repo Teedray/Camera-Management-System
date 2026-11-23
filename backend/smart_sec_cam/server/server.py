@@ -18,7 +18,7 @@ from flask_cors import CORS
 from flask_socketio import SocketIO, join_room
 
 from smart_sec_cam.auth.authentication import Authenticator
-from smart_sec_cam.auth.database import AuthDatabase
+from smart_sec_cam.auth.database import AuthDatabase, LastAdministratorError
 from smart_sec_cam.auth.models import User
 from smart_sec_cam.redis import RedisImageReceiver
 from smart_sec_cam.video.manager import VideoManager
@@ -393,6 +393,72 @@ def get_current_user():
             "cameras": auth_db.get_user_cameras(user.user_id)
         }
     ), 200
+
+
+@app.route("/api/v1/users", methods=["GET"])
+@require_administrator
+def list_users():
+    return jsonify(success=True, data={"items": auth_db.list_user_profiles()}), 200
+
+
+@app.route("/api/v1/users", methods=["POST"])
+@require_administrator
+def create_user():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify(success=False, error="Expected a JSON object"), 400
+    if payload.keys() - {"username", "password", "role"}:
+        return jsonify(success=False, error="Unsupported user fields"), 400
+
+    for field in ("username", "password"):
+        value = payload.get(field)
+        if not isinstance(value, str) or not value.strip() or "\x00" in value:
+            return jsonify(
+                success=False, error=f"{field} must be a non-empty text value"
+            ), 400
+
+    role = payload.get("role", "viewer")
+    if role not in User.ROLES:
+        return jsonify(success=False, error="Invalid user role"), 400
+
+    user = User(payload["username"], role=role)
+    user.generate_id()
+    try:
+        user.set_password(payload["password"])
+        auth_db.add_user(user)
+    except UnicodeEncodeError:
+        return jsonify(
+            success=False, error="Username and password must contain valid Unicode"
+        ), 400
+    except ValueError:
+        return jsonify(success=False, error="Username already exists"), 409
+
+    return jsonify(success=True, data={
+        "id": user.user_id, "username": user.username, "role": user.role
+    }), 201
+
+
+@app.route("/api/v1/users/<user_id>", methods=["PATCH"])
+@require_administrator
+def change_user_role(user_id):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify(success=False, error="Expected a JSON object"), 400
+    if payload.keys() != {"role"}:
+        return jsonify(success=False, error="Only the role field is supported"), 400
+    if payload["role"] not in User.ROLES:
+        return jsonify(success=False, error="Invalid user role"), 400
+
+    try:
+        profile = auth_db.update_user_role(user_id, payload["role"])
+    except LastAdministratorError as error:
+        return jsonify(success=False, error=str(error)), 409
+
+    if profile is None:
+        return jsonify(success=False, error="User does not exist"), 404
+
+    return jsonify(success=True, data=profile), 200
+
 
 @app.route("/api/v1/cameras", methods=["GET"])
 @require_token

@@ -5,6 +5,10 @@ from typing import List
 from smart_sec_cam.auth.models import User
 
 
+class LastAdministratorError(ValueError):
+    pass
+
+
 class AuthDatabase:
     DATABASE_DIR = "data/"
     FILE_TYPE = ".db"
@@ -89,24 +93,50 @@ class AuthDatabase:
         self.conn.commit()
 
     def add_user(self, user: User):
-        cursor = self.conn.cursor()
-        # Throw an error if this user already exists
-        if self.get_user_by_username_or_id(user.user_id, user.username):
-            raise ValueError("A user with this user id or username already exists")
-        # Create User
-        cursor.execute(
-            f"INSERT INTO {self.USER_TABLE} "
-            "(id, username, salt, hash, role) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (
-                user.user_id,
-                user.username,
-                user.salt,
-                user.password_hash,
-                user.role
-            )
+        with self.conn:
+            inserted = self.conn.execute(
+                f"INSERT INTO {self.USER_TABLE} (id, username, salt, hash, role) "
+                "SELECT ?, ?, ?, ?, ? "
+                f"WHERE NOT EXISTS (SELECT 1 FROM {self.USER_TABLE} "
+                "WHERE id = ? OR username = ?)",
+                (
+                    user.user_id, user.username, user.salt, user.password_hash,
+                    user.role, user.user_id, user.username
+                )
+            ).rowcount
+            if not inserted:
+                raise ValueError("A user with this user id or username already exists")
+
+    def list_user_profiles(self):
+        rows = self.conn.execute(
+            f"SELECT id, username, role FROM {self.USER_TABLE} ORDER BY username, id"
         )
-        self.conn.commit()
+        return [
+            {"id": user_id, "username": username, "role": role}
+            for user_id, username, role in rows
+        ]
+
+    def update_user_role(self, user_id: str, role: str):
+        with self.conn:
+            # SQLite checks for another administrator while holding the write lock.
+            updated = self.conn.execute(
+                f"UPDATE {self.USER_TABLE} SET role = ? WHERE id = ? AND ("
+                "role != 'administrator' OR ? = 'administrator' OR EXISTS ("
+                f"SELECT 1 FROM {self.USER_TABLE} "
+                "WHERE role = 'administrator' AND id != ?))",
+                (role, user_id, role, user_id)
+            ).rowcount
+            row = self.conn.execute(
+                f"SELECT id, username, role FROM {self.USER_TABLE} WHERE id = ?",
+                (user_id,)
+            ).fetchone()
+
+            if row is None:
+                return None
+            if not updated:
+                raise LastAdministratorError("Cannot demote the last administrator")
+
+        return {"id": row[0], "username": row[1], "role": row[2]}
 
     def get_user_by_id(self, user_id: str):
         cursor = self.conn.cursor()
