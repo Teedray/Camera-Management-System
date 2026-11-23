@@ -57,7 +57,7 @@ class Authenticator:
             'client_ip': client_ip_addr
         }
         return jwt.encode(payload, self.secret, algorithm='HS256')
-    
+
     def get_authenticated_user(self, token: str, client_ip_addr: str):
         payload = jwt.decode(
             token,
