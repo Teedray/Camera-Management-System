@@ -190,8 +190,7 @@ class AuthDatabase:
                 tuple(value.strip() for value in values)
             )
 
-    def assign_camera(self, user_id, camera_id):
-        # Validate both records before granting access.
+    def require_camera_assignment_targets(self, user_id, camera_id):
         if self.get_user_by_id(user_id) is None:
             raise ValueError("User does not exist")
 
@@ -202,6 +201,9 @@ class AuthDatabase:
 
         if camera is None:
             raise ValueError("Camera does not exist")
+
+    def assign_camera(self, user_id, camera_id):
+        self.require_camera_assignment_targets(user_id, camera_id)
 
         with self.conn:
             self.conn.execute(

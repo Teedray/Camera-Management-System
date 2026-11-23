@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import sqlite3
 import time
 from datetime import datetime
 from functools import wraps
@@ -60,6 +61,20 @@ def require_token(f):
         return f(*args, **kwargs)
 
     return decorated
+
+def require_administrator(f):
+    @require_token
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if g.current_user.role != "administrator":
+            return jsonify(
+                success=False, error="Administrator role required"
+            ), 403
+
+        return f(*args, **kwargs)
+
+    return decorated
+
 
 def recording_details(file_name):
     if not isinstance(file_name, str):
@@ -388,6 +403,80 @@ def list_assigned_cameras():
         success=True,
         data={"items": cameras}
     ), 200
+
+@app.route("/api/v1/cameras", methods=["POST"])
+@require_administrator
+def register_camera():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify(
+            success=False, error="Expected a JSON object"
+        ), 400
+
+    camera = {}
+    for field in ("id", "name", "location", "channel_name"):
+        value = payload.get(field)
+        if not isinstance(value, str) or not value.strip() or "\x00" in value:
+            return jsonify(
+                success=False, error=f"{field} must be a non-empty text value"
+            ), 400
+        camera[field] = value.strip()
+
+    if camera["id"] in (".", "..") or any(
+        separator in camera["id"] for separator in ("/", "\\")
+    ):
+        return jsonify(
+            success=False, error="id must be a valid URL path segment"
+        ), 400
+
+    if any(separator in camera["channel_name"] for separator in ("/", "\\")):
+        return jsonify(
+            success=False, error="channel_name cannot contain path separators"
+        ), 400
+
+    try:
+        auth_db.add_camera(
+            camera["id"], camera["name"], camera["location"],
+            camera["channel_name"]
+        )
+    except UnicodeEncodeError:
+        return jsonify(
+            success=False, error="Camera fields must contain valid Unicode"
+        ), 400
+    except sqlite3.IntegrityError:
+        return jsonify(
+            success=False, error="Camera ID or channel name already exists"
+        ), 409
+
+    return jsonify(success=True, data={**camera, "enabled": True}), 201
+
+
+@app.route("/api/v1/users/<user_id>/cameras/<camera_id>", methods=["PUT", "DELETE"])
+@require_administrator
+def update_camera_assignment(user_id, camera_id):
+    if any(not value.strip() or "\x00" in value for value in (user_id, camera_id)):
+        return jsonify(
+            success=False, error="User ID and camera ID must be non-empty text"
+        ), 400
+
+    try:
+        if request.method == "PUT":
+            auth_db.assign_camera(user_id, camera_id)
+        else:
+            auth_db.require_camera_assignment_targets(user_id, camera_id)
+            auth_db.revoke_camera(user_id, camera_id)
+    except ValueError as error:
+        return jsonify(success=False, error=str(error)), 404
+    except sqlite3.IntegrityError:
+        # A grant can lose a foreign-key target after validation.
+        return jsonify(
+            success=False, error="User or camera does not exist"
+        ), 404
+
+    return jsonify(
+        success=True, data={"user_id": user_id, "camera_id": camera_id}
+    ), 200
+
 
 def deliver_live_frame(channel, image):
     if isinstance(channel, bytes):
