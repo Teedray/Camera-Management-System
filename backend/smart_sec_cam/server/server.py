@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import time
+from datetime import datetime
 from functools import wraps
 
 import eventlet
@@ -59,6 +60,32 @@ def require_token(f):
         return f(*args, **kwargs)
 
     return decorated
+
+def recording_details(file_name):
+    if not isinstance(file_name, str):
+        return None
+
+    if any(character in file_name for character in ("/", "\\", "\x00")):
+        return None
+
+    stem, extension = os.path.splitext(file_name)
+
+    if extension not in (".webm", ".mp4") or "__" not in stem:
+        return None
+
+    channel, timestamp_text = stem.rsplit("__", 1)
+
+    if not channel:
+        return None
+
+    try:
+        timestamp = datetime.strptime(
+            timestamp_text, "%Y-%m-%d_%H:%M:%S"
+        )
+    except ValueError:
+        return None
+
+    return channel, timestamp, extension
 
 
 """
@@ -237,33 +264,105 @@ def get_rooms():
 @app.route("/api/video/video-list", methods=["GET"])
 @require_token
 def get_video_list():
-    video_type = request.args.get("video-format")  # "webm" or "mp4"
-    global VIDEO_DIR
-    video_manager = VideoManager(video_dir=VIDEO_DIR)
-    return json.dumps({'videos': video_manager.get_video_filenames(video_type)}), 200, {'ContentType': 'application/json'}
+    video_format = request.args.get("video-format", "webm")
 
+    if video_format not in ("webm", "mp4"):
+        return jsonify(
+            status="ERROR", error="Unsupported video format"
+        ), 400
+
+    allowed_channels = {
+        camera["channel_name"]
+        for camera in auth_db.get_user_cameras(
+            g.current_user.user_id
+        )
+    }
+
+    recordings = []
+
+    try:
+        with os.scandir(VIDEO_DIR) as entries:
+            for entry in entries:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+
+                details = recording_details(entry.name)
+                if details is None:
+                    continue
+
+                channel, timestamp, extension = details
+
+                if (
+                    channel in allowed_channels
+                    and extension == "." + video_format
+                ):
+                    recordings.append((timestamp, entry.name))
+    except FileNotFoundError:
+        return jsonify(videos=[]), 200
+
+    recordings.sort(reverse=True)
+
+    return jsonify(
+        videos=[name for timestamp, name in recordings]
+    ), 200
 
 @app.route("/api/video/<file_name>", methods=["GET"])
-def get_video(file_name: str):
-    # Validate token
-    token = request.args.get("token")
-    client_ip_addr = request.remote_addr
+def get_video(file_name):
+    token = (
+        request.headers.get("x-access-token")
+        or request.args.get("token")
+    )
+
     if not token:
-        return json.dumps({'status': "ERROR", "error": "Missing token"}), 401, {'ContentType': 'application/json'}
+        return jsonify(
+            status="ERROR", error="Missing token"
+        ), 401
+
     try:
-        if not authenticator.validate_token(token, client_ip_addr):
-            return json.dumps({'status': "ERROR", "error": "Invalid token"}), 401, {'ContentType': 'application/json'}
-    except (jwt.exceptions.InvalidSignatureError, jwt.exceptions.DecodeError, jwt.exceptions.ExpiredSignatureError):
-        return json.dumps({'status': "ERROR", "error": "Invalid token"}), 401, {'ContentType': 'application/json'}
-    # Return video
-    global VIDEO_DIR
-    if "webm" in file_name:
-        mime_type = 'video/webm'
-    elif "mp4" in file_name:
-        mime_type = 'video/mp4'
-    else:
-        return json.dumps({'status': "ERROR"}), 404, {'ContentType': 'application/json'}
-    return send_from_directory(VIDEO_DIR, file_name, as_attachment=True, mimetype=mime_type)
+        user = authenticator.get_authenticated_user(
+            token, request.remote_addr
+        )
+    except jwt.exceptions.InvalidTokenError:
+        return jsonify(
+            status="ERROR", error="Invalid or expired token"
+        ), 401
+
+    details = recording_details(file_name)
+    if details is None:
+        return jsonify(
+            status="ERROR", error="Recording unavailable"
+        ), 404
+
+    channel, timestamp, extension = details
+
+    allowed_channels = {
+        camera["channel_name"]
+        for camera in auth_db.get_user_cameras(user.user_id)
+    }
+
+    if channel not in allowed_channels:
+        return jsonify(
+            status="ERROR", error="Recording unavailable"
+        ), 404
+
+    directory = os.path.abspath(VIDEO_DIR)
+    path = os.path.join(directory, file_name)
+
+    if not os.path.isfile(path) or os.path.islink(path):
+        return jsonify(
+            status="ERROR", error="Recording unavailable"
+        ), 404
+
+    mime_type = (
+        "video/webm" if extension == ".webm" else "video/mp4"
+    )
+
+    return send_from_directory(
+        directory,
+        file_name,
+        as_attachment=False,
+        mimetype=mime_type
+    )
 
 @app.route("/api/v1/auth/me", methods=["GET"])
 @require_token
