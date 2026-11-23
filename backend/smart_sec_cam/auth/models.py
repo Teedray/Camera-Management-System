@@ -4,16 +4,28 @@ import uuid
 
 
 class User:
+    ROLES = ("administrator", "manager", "viewer")
     SALT_LENGTH = 32
     HASH_ALGORITHM = 'sha256'
     PASSWORD_ENCODING = 'utf-8'
     HASH_ITERS = 100000
 
-    def __init__(self, username: str, user_id: str = None, salt: bytes = None, password_hash: str = None):
+    def __init__(
+        self,
+        username: str,
+        user_id: str = None,
+        salt: bytes = None,
+        password_hash: str = None,
+        role: str = "viewer"
+    ):
+        if role not in self.ROLES:
+            raise ValueError("Invalid user role")
+
         self.user_id = user_id
         self.username = username
         self.salt = salt
         self.password_hash = password_hash
+        self.role = role
 
     def generate_id(self):
         self.user_id = uuid.uuid4().hex

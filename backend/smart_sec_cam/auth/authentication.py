@@ -7,7 +7,7 @@ from smart_sec_cam.auth.database import AuthDatabase
 
 
 class Authenticator:
-    JWT_SECRET_LENGTH = 24
+    JWT_SECRET_LENGTH = 32
     TOKEN_DURATION_HOURS = 1
 
     def __init__(self, auth_db: AuthDatabase):
@@ -27,7 +27,7 @@ class Authenticator:
 
     def validate_token(self, token: str, client_ip_addr: str) -> bool:
         payload = jwt.decode(token, self.secret, algorithms=['HS256'])
-        return payload['exp'] > datetime.datetime.utcnow().timestamp() and payload['client_ip'] == client_ip_addr
+        return payload['exp'] > self._now().timestamp() and payload['client_ip'] == client_ip_addr
 
     def refresh_token(self, token: str, client_ip_addr: str) -> str:
         if self.validate_token(token, client_ip_addr):
@@ -39,13 +39,42 @@ class Authenticator:
         Returns token's time to live (TTL) in seconds
         """
         payload = jwt.decode(token, self.secret, algorithms=['HS256'])
-        return payload['exp'] - datetime.datetime.utcnow().timestamp()
+        return payload['exp'] - self._now().timestamp()
+
+    @staticmethod
+    def _now() -> datetime.datetime:
+        # Timezone-aware UTC. A naive utcnow() is interpreted as local time by
+        # .timestamp(), which shifts 'iat'/'exp' by the host's UTC offset and
+        # makes tokens invalid on any server not running in UTC.
+        return datetime.datetime.now(datetime.timezone.utc)
 
     def _generate_token(self, user_id: str, client_ip_addr: str) -> str:
+        now = self._now()
         payload = {
-            'exp': (datetime.datetime.utcnow() + datetime.timedelta(hours=self.TOKEN_DURATION_HOURS)).timestamp(),
-            'iat': (datetime.datetime.utcnow() - datetime.timedelta(seconds=1)).timestamp(),  # Decrement by one to prevent "token not yet valid" error.
+            'exp': (now + datetime.timedelta(hours=self.TOKEN_DURATION_HOURS)).timestamp(),
+            'iat': (now - datetime.timedelta(seconds=1)).timestamp(),  # Decrement by one to prevent "token not yet valid" error.
             'sub': user_id,
             'client_ip': client_ip_addr
         }
         return jwt.encode(payload, self.secret, algorithm='HS256')
+
+    def get_authenticated_user(self, token: str, client_ip_addr: str):
+        payload = jwt.decode(
+            token,
+            self.secret,
+            algorithms=["HS256"],
+            options={"require": ["exp", "sub", "client_ip"]}
+        )
+
+        if payload["client_ip"] != client_ip_addr:
+            raise jwt.InvalidTokenError("Client address mismatch")
+
+        user_id = payload["sub"]
+        if not isinstance(user_id, str) or not user_id:
+            raise jwt.InvalidTokenError("Invalid user identity")
+
+        user = self.auth_db.get_user_by_id(user_id)
+        if user is None:
+            raise jwt.InvalidTokenError("User no longer exists")
+
+        return user
