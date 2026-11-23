@@ -5,6 +5,8 @@ import sqlite3
 import time
 from datetime import datetime
 from functools import wraps
+from numbers import Real
+from pathlib import Path
 
 import eventlet
 eventlet.monkey_patch()
@@ -22,6 +24,8 @@ from smart_sec_cam.auth.database import AuthDatabase, LastAdministratorError
 from smart_sec_cam.auth.models import User
 from smart_sec_cam.redis import RedisImageReceiver
 from smart_sec_cam.video.catalogue import assigned_variants, import_completed, media_file
+from smart_sec_cam.video.incident_clips import IncidentClipManager
+from smart_sec_cam.video.incident_database import IncidentDatabase
 
 # SocketIO & CORS
 app = Flask(__name__, static_url_path='', static_folder='/backend/build', template_folder='/backend/build')
@@ -32,6 +36,11 @@ auth_db = AuthDatabase()
 authenticator = Authenticator(auth_db)
 # Application-specific data
 VIDEO_DIR = "data/videos"
+# Protected Incident Archive: kept apart from routine recordings so that
+# retention cleanup of VIDEO_DIR cannot reach saved incident clips (SR-04-03).
+INCIDENT_ARCHIVE_DIR = "data/incident_archive"
+# Roles allowed to save incident clips (UC04 precondition, SEC-01).
+INCIDENT_ROLES = ("administrator", "manager")
 rooms = {}
 live_subscriptions = {}
 ENABLE_USER_REGISTRATION = False
@@ -101,6 +110,67 @@ def recording_details(file_name):
         return None
 
     return channel, timestamp, extension
+
+
+def resolve_recording(user_id, file_name):
+    """Return the file for a recording the user's assigned cameras permit, else None.
+
+    Shared by playback and incident saving so that both pass the same
+    per-camera access check before any footage is reached (SR-06-02, LPR-02).
+    """
+    extension = os.path.splitext(file_name)[1]
+    import_completed(auth_db, VIDEO_DIR)
+    matches = assigned_variants(auth_db, user_id, extension[1:], file_name)
+    if matches:
+        return media_file(VIDEO_DIR, matches[0][1])
+
+    # Legacy filenames are disjoint from catalogue filenames (which carry an ID).
+    details = recording_details(file_name)
+    channels = {camera["channel_name"] for camera in auth_db.get_user_cameras(user_id)}
+    return media_file(VIDEO_DIR, file_name) if details and details[0] in channels else None
+
+
+def has_incident_role(user_id):
+    user = auth_db.get_user_by_id(user_id)
+    return user is not None and user.role in INCIDENT_ROLES
+
+
+def incident_repository():
+    # Incident records live in the shared SQL database (SDS Data Storage Layer).
+    return IncidentDatabase(conn=auth_db.conn)
+
+
+def incident_manager():
+    return IncidentClipManager(
+        video_dir=VIDEO_DIR,
+        archive_dir=INCIDENT_ARCHIVE_DIR,
+        authorization_check=has_incident_role,
+        incident_db=incident_repository(),
+        source_resolver=lambda file_name, user_id: resolve_recording(user_id, file_name)
+    )
+
+
+def incident_profile(incident):
+    return {
+        "id": incident["id"],
+        "camera": incident["camera"],
+        "start_time": incident["start_time"],
+        "end_time": incident["end_time"],
+        "incident_flag": bool(incident["incident_flag"]),
+        "title": incident["title"],
+        "notes": incident["notes"],
+        "created_by": incident["created_by"],
+        "created_at": incident["created_at"],
+        "video_url": f"/api/v1/incidents/{incident['id']}/video"
+    }
+
+
+def visible_incident(user_id, incident_id):
+    channels = [camera["channel_name"] for camera in auth_db.get_user_cameras(user_id)]
+    for incident in incident_repository().list_incidents(channels):
+        if incident["id"] == incident_id:
+            return incident
+    return None
 
 
 """
@@ -349,15 +419,7 @@ def get_video(file_name):
         ), 401
 
     extension = os.path.splitext(file_name)[1]
-    import_completed(auth_db, VIDEO_DIR)
-    matches = assigned_variants(auth_db, user.user_id, extension[1:], file_name)
-    if matches:
-        path = media_file(VIDEO_DIR, matches[0][1])
-    else:
-        # Legacy filenames are disjoint from catalogue filenames (which carry an ID).
-        details = recording_details(file_name)
-        channels = {camera["channel_name"] for camera in auth_db.get_user_cameras(user.user_id)}
-        path = media_file(VIDEO_DIR, file_name) if details and details[0] in channels else None
+    path = resolve_recording(user.user_id, file_name)
 
     if path is None:
         return jsonify(status="ERROR", error="Recording unavailable"), 404
@@ -539,6 +601,119 @@ def update_camera_assignment(user_id, camera_id):
     ), 200
 
 
+@app.route("/api/v1/incidents", methods=["POST"])
+@require_token
+def save_incident():
+    """Save a portion of a recording as a flagged incident clip (UC04, SR-04-01..03)."""
+    user = g.current_user
+    if user.role not in INCIDENT_ROLES:
+        return jsonify(
+            success=False, error="Manager or administrator role required"
+        ), 403
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify(success=False, error="Expected a JSON object"), 400
+    if payload.keys() - {"filename", "start_time", "end_time", "title", "notes"}:
+        return jsonify(success=False, error="Unsupported incident fields"), 400
+
+    file_name = payload.get("filename")
+    if not isinstance(file_name, str) or not file_name or any(
+        character in file_name for character in ("/", "\\", "\x00")
+    ):
+        return jsonify(success=False, error="filename must be a recording name"), 400
+
+    start_time = payload.get("start_time")
+    end_time = payload.get("end_time")
+    if any(
+        isinstance(value, bool) or not isinstance(value, Real)
+        for value in (start_time, end_time)
+    ):
+        return jsonify(
+            success=False, error="start_time and end_time must be numbers of seconds"
+        ), 400
+    if not 0 <= start_time < end_time:
+        return jsonify(
+            success=False, error="start_time must be before end_time"
+        ), 400
+
+    title = payload.get("title")
+    if not isinstance(title, str) or not title.strip() or "\x00" in title:
+        return jsonify(success=False, error="title must be a non-empty text value"), 400
+    notes = payload.get("notes", "")
+    if not isinstance(notes, str) or "\x00" in notes:
+        return jsonify(success=False, error="notes must be a text value"), 400
+
+    # Per-camera permission check before any footage is reached.
+    if resolve_recording(user.user_id, file_name) is None:
+        return jsonify(success=False, error="Recording unavailable"), 404
+
+    incident_id = incident_manager().create_incident_clip(
+        file_name, start_time, end_time, user.user_id,
+        title=title.strip(), notes=notes
+    )
+    if incident_id is None:
+        # SAF-02: report failure unless the archived clip was verified.
+        return jsonify(
+            success=False,
+            error="Incident clip could not be saved; check the selected interval"
+        ), 422
+
+    incident = visible_incident(user.user_id, incident_id)
+    return jsonify(success=True, data=incident_profile(incident)), 201
+
+
+@app.route("/api/v1/incidents", methods=["GET"])
+@require_token
+def list_incidents():
+    channels = [
+        camera["channel_name"]
+        for camera in auth_db.get_user_cameras(g.current_user.user_id)
+    ]
+    incidents = incident_repository().list_incidents(channels)
+    return jsonify(
+        success=True,
+        data={"items": [incident_profile(incident) for incident in incidents]}
+    ), 200
+
+
+@app.route("/api/v1/incidents/<incident_id>", methods=["GET"])
+@require_token
+def get_incident(incident_id):
+    incident = visible_incident(g.current_user.user_id, incident_id)
+    if incident is None:
+        return jsonify(success=False, error="Incident does not exist"), 404
+    return jsonify(success=True, data=incident_profile(incident)), 200
+
+
+@app.route("/api/v1/incidents/<incident_id>/video", methods=["GET"])
+def get_incident_video(incident_id):
+    token = (
+        request.headers.get("x-access-token")
+        or request.args.get("token")
+    )
+    if not token:
+        return jsonify(status="ERROR", error="Missing token"), 401
+
+    try:
+        user = authenticator.get_authenticated_user(token, request.remote_addr)
+    except jwt.exceptions.InvalidTokenError:
+        return jsonify(status="ERROR", error="Invalid or expired token"), 401
+
+    incident = visible_incident(user.user_id, incident_id)
+    path = media_file(INCIDENT_ARCHIVE_DIR, incident["filename"]) if incident else None
+    if path is None:
+        return jsonify(status="ERROR", error="Incident clip unavailable"), 404
+
+    return send_from_directory(
+        str(path.parent),
+        path.name,
+        download_name=Path(incident["filename"]).name,
+        as_attachment=False,
+        mimetype="video/mp4"
+    )
+
+
 def deliver_live_frame(channel, image):
     if isinstance(channel, bytes):
         channel = channel.decode("utf-8")
@@ -617,9 +792,12 @@ if __name__ == '__main__':
     parser.add_argument('--redis-port', help='Server port to stream images to', type=int, default=6379)
     parser.add_argument('--video-dir', help='Directory in which video files are stored', type=str,
                         default="data/videos")
+    parser.add_argument('--incident-dir', help='Directory for the protected incident clip archive', type=str,
+                        default="data/incident_archive")
     args = parser.parse_args()
 
     VIDEO_DIR = args.video_dir
+    INCIDENT_ARCHIVE_DIR = args.incident_dir
     ENABLE_USER_REGISTRATION = bool(int(os.environ.get("ENABLE_REGISTRATION")))
 
     socketio.start_background_task(register_completed_recordings)
