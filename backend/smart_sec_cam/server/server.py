@@ -21,7 +21,7 @@ from smart_sec_cam.auth.authentication import Authenticator
 from smart_sec_cam.auth.database import AuthDatabase, LastAdministratorError
 from smart_sec_cam.auth.models import User
 from smart_sec_cam.redis import RedisImageReceiver
-from smart_sec_cam.video.manager import VideoManager
+from smart_sec_cam.video.catalogue import assigned_variants, import_completed, media_file
 
 # SocketIO & CORS
 app = Flask(__name__, static_url_path='', static_folder='/backend/build', template_folder='/backend/build')
@@ -293,7 +293,13 @@ def get_video_list():
         )
     }
 
-    recordings = []
+    import_completed(auth_db, VIDEO_DIR)
+    recordings = [
+        (datetime.fromisoformat(start).timestamp(), filename)
+        for filename, path, start in assigned_variants(auth_db, g.current_user.user_id, video_format)
+        if media_file(VIDEO_DIR, path) is not None
+    ]
+    # Pre-catalogue files keep their original names and channel-based access rules.
 
     try:
         with os.scandir(VIDEO_DIR) as entries:
@@ -311,7 +317,7 @@ def get_video_list():
                     channel in allowed_channels
                     and extension == "." + video_format
                 ):
-                    recordings.append((timestamp, entry.name))
+                    recordings.append((timestamp.timestamp(), entry.name))
     except FileNotFoundError:
         return jsonify(videos=[]), 200
 
@@ -342,39 +348,28 @@ def get_video(file_name):
             status="ERROR", error="Invalid or expired token"
         ), 401
 
-    details = recording_details(file_name)
-    if details is None:
-        return jsonify(
-            status="ERROR", error="Recording unavailable"
-        ), 404
+    extension = os.path.splitext(file_name)[1]
+    import_completed(auth_db, VIDEO_DIR)
+    matches = assigned_variants(auth_db, user.user_id, extension[1:], file_name)
+    if matches:
+        path = media_file(VIDEO_DIR, matches[0][1])
+    else:
+        # Legacy filenames are disjoint from catalogue filenames (which carry an ID).
+        details = recording_details(file_name)
+        channels = {camera["channel_name"] for camera in auth_db.get_user_cameras(user.user_id)}
+        path = media_file(VIDEO_DIR, file_name) if details and details[0] in channels else None
 
-    channel, timestamp, extension = details
-
-    allowed_channels = {
-        camera["channel_name"]
-        for camera in auth_db.get_user_cameras(user.user_id)
-    }
-
-    if channel not in allowed_channels:
-        return jsonify(
-            status="ERROR", error="Recording unavailable"
-        ), 404
-
-    directory = os.path.abspath(VIDEO_DIR)
-    path = os.path.join(directory, file_name)
-
-    if not os.path.isfile(path) or os.path.islink(path):
-        return jsonify(
-            status="ERROR", error="Recording unavailable"
-        ), 404
+    if path is None:
+        return jsonify(status="ERROR", error="Recording unavailable"), 404
 
     mime_type = (
         "video/webm" if extension == ".webm" else "video/mp4"
     )
 
     return send_from_directory(
-        directory,
-        file_name,
+        str(path.parent),
+        path.name,
+        download_name=file_name,
         as_attachment=False,
         mimetype=mime_type
     )
@@ -608,6 +603,12 @@ def listen_for_images(redis_url: str, redis_port: int):
         eventlet.sleep(0.001)
 
 
+def register_completed_recordings():
+    while True:
+        import_completed(auth_db, VIDEO_DIR)
+        socketio.sleep(5)
+
+
 if __name__ == '__main__':
     import argparse
 
@@ -621,6 +622,7 @@ if __name__ == '__main__':
     VIDEO_DIR = args.video_dir
     ENABLE_USER_REGISTRATION = bool(int(os.environ.get("ENABLE_REGISTRATION")))
 
+    socketio.start_background_task(register_completed_recordings)
     socketio.start_background_task(listen_for_images, args.redis_url, args.redis_port)
     socketio.run(app, host='0.0.0.0', port="8443", debug=True, certfile='certs/sec-cam-server.cert',
                  keyfile='certs/sec-cam-server.key')

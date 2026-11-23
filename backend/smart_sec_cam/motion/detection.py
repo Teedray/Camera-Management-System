@@ -1,3 +1,4 @@
+import logging
 import queue
 import threading
 import time
@@ -121,7 +122,10 @@ class MotionDetector:
                 old_frame = new_frame
             else:
                 time.sleep(0.01)
-        self.video_writer.write()
+        try:
+            self.video_writer.write()
+        except (OSError, RuntimeError, cv2.error):
+            logging.exception("Failed to finalize recording for %s", self.channel_name)
 
     def _done_recording_video(self, start_time: float) -> bool:
         return time.monotonic() - start_time > self.video_duration

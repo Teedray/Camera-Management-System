@@ -74,6 +74,26 @@ class AuthDatabase:
             )
         """)
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS recordings (
+                id TEXT PRIMARY KEY NOT NULL,
+                camera_id TEXT NOT NULL REFERENCES cameras(id),
+                capture_start_utc TEXT NOT NULL,
+                capture_end_utc TEXT NOT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS recording_variants (
+                recording_id TEXT NOT NULL REFERENCES recordings(id),
+                format TEXT NOT NULL CHECK (format IN ('webm', 'mp4')),
+                filename TEXT NOT NULL UNIQUE,
+                path TEXT NOT NULL UNIQUE,
+                size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+                duration_seconds REAL NOT NULL CHECK (duration_seconds > 0),
+                PRIMARY KEY (recording_id, format)
+            )
+        """)
+
         self.conn.commit()
 
         columns = {
