@@ -27,7 +27,7 @@ class Authenticator:
 
     def validate_token(self, token: str, client_ip_addr: str) -> bool:
         payload = jwt.decode(token, self.secret, algorithms=['HS256'])
-        return payload['exp'] > datetime.datetime.utcnow().timestamp() and payload['client_ip'] == client_ip_addr
+        return payload['exp'] > self._now().timestamp() and payload['client_ip'] == client_ip_addr
 
     def refresh_token(self, token: str, client_ip_addr: str) -> str:
         if self.validate_token(token, client_ip_addr):
@@ -39,12 +39,20 @@ class Authenticator:
         Returns token's time to live (TTL) in seconds
         """
         payload = jwt.decode(token, self.secret, algorithms=['HS256'])
-        return payload['exp'] - datetime.datetime.utcnow().timestamp()
+        return payload['exp'] - self._now().timestamp()
+
+    @staticmethod
+    def _now() -> datetime.datetime:
+        # Timezone-aware UTC. A naive utcnow() is interpreted as local time by
+        # .timestamp(), which shifts 'iat'/'exp' by the host's UTC offset and
+        # makes tokens invalid on any server not running in UTC.
+        return datetime.datetime.now(datetime.timezone.utc)
 
     def _generate_token(self, user_id: str, client_ip_addr: str) -> str:
+        now = self._now()
         payload = {
-            'exp': (datetime.datetime.utcnow() + datetime.timedelta(hours=self.TOKEN_DURATION_HOURS)).timestamp(),
-            'iat': (datetime.datetime.utcnow() - datetime.timedelta(seconds=1)).timestamp(),  # Decrement by one to prevent "token not yet valid" error.
+            'exp': (now + datetime.timedelta(hours=self.TOKEN_DURATION_HOURS)).timestamp(),
+            'iat': (now - datetime.timedelta(seconds=1)).timestamp(),  # Decrement by one to prevent "token not yet valid" error.
             'sub': user_id,
             'client_ip': client_ip_addr
         }
