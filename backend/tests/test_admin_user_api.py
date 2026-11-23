@@ -10,6 +10,27 @@ NEW_USER = {"username": "new-user", "password": "test-only-password"}
 
 
 class AdminUserApiTest(AdminApiTestCase):
+    def stored_user_data(self):
+        users = self.db.conn.execute(
+            "SELECT id, username, salt, hash, role FROM users ORDER BY id"
+        ).fetchall()
+        assignments = self.db.conn.execute(
+            "SELECT user_id, camera_id FROM user_cameras ORDER BY user_id, camera_id"
+        ).fetchall()
+        return users, assignments
+
+    def assert_admin_requests_denied(self, headers, status, error, target_url):
+        before = self.stored_user_data()
+        for method, url, payload in (
+            ("GET", USERS_URL, None),
+            ("POST", USERS_URL, NEW_USER),
+            ("PATCH", target_url, {"role": "administrator"})
+        ):
+            with self.subTest(method=method):
+                response = self.client.open(url, method=method, headers=headers, json=payload)
+                self.assert_error(response, status, error)
+                self.assertEqual(self.stored_user_data(), before)
+
     def test_requires_a_current_administrator_for_every_method(self):
         with patch.object(self.server.authenticator, "TOKEN_DURATION_HOURS", -1):
             login = self.client.post("/api/auth/login", json={
@@ -17,24 +38,15 @@ class AdminUserApiTest(AdminApiTestCase):
             })
         expired = {"x-access-token": json.loads(login.data)["token"]}
 
-        for headers, status, error in (
-            ({}, 401, "Missing token"),
-            ({"x-access-token": "invalid"}, 401, "Invalid or expired token"),
-            (expired, 401, "Invalid or expired token"),
-            (self.headers["manager"], 403, "Administrator role required"),
-            (self.headers["viewer"], 403, "Administrator role required")
+        for caller, headers, status, error in (
+            ("no token", {}, 401, "Missing token"),
+            ("invalid token", {"x-access-token": "invalid"}, 401, "Invalid or expired token"),
+            ("expired token", expired, 401, "Invalid or expired token"),
+            ("manager", self.headers["manager"], 403, "Administrator role required"),
+            ("viewer", self.headers["viewer"], 403, "Administrator role required")
         ):
-            for method, url, payload in (
-                ("GET", USERS_URL, None),
-                ("POST", USERS_URL, NEW_USER),
-                ("PATCH", VIEWER_URL, {"role": "administrator"})
-            ):
-                with self.subTest(method=method, status=status, error=error):
-                    response = self.client.open(url, method=method, headers=headers, json=payload)
-                    self.assert_error(response, status, error)
-
-        self.assertEqual(self.db.get_num_users(), 3)
-        self.assertEqual(self.db.get_user_by_id("viewer-id").role, "viewer")
+            with self.subTest(caller=caller):
+                self.assert_admin_requests_denied(headers, status, error, VIEWER_URL)
 
     def test_list_returns_only_public_user_fields(self):
         response = self.client.get(USERS_URL, headers=self.headers["administrator"])
@@ -81,27 +93,31 @@ class AdminUserApiTest(AdminApiTestCase):
     def test_duplicate_creation_keeps_the_existing_account_and_assignment(self):
         self.db.add_camera("cam", "Camera", "Entrance", "stream")
         self.db.assign_camera("viewer-id", "cam")
+        before = self.stored_user_data()
+
         response = self.client.post(USERS_URL, headers=self.headers["administrator"], json={
             "username": "viewer", "password": "different-password", "role": "administrator"
         })
         self.assert_error(response, 409, "Username already exists")
 
-        self.assertEqual(self.db.get_num_users(), 3)
-        viewer = self.db.get_user_by_id("viewer-id")
-        self.assertEqual(viewer.role, "viewer")
-        self.assertTrue(viewer.does_password_match("test-password"))
-        self.assertTrue(self.db.can_access_camera("viewer-id", "cam"))
+        self.assertEqual(self.stored_user_data(), before)
 
     def test_rejects_invalid_creation_inputs(self):
         admin = self.headers["administrator"]
+        self.db.add_camera("cam", "Camera", "Entrance", "stream")
+        self.db.assign_camera("viewer-id", "cam")
+        before = self.stored_user_data()
+
         for body in ("{", "null", "[]"):
             response = self.client.post(
                 USERS_URL, headers=admin, data=body, content_type="application/json"
             )
             self.assert_error(response, 400, "Expected a JSON object")
+            self.assertEqual(self.stored_user_data(), before)
 
         for payload, error in (
             ({}, "username must be a non-empty text value"),
+            ({"password": NEW_USER["password"]}, "username must be a non-empty text value"),
             ({"username": "name"}, "password must be a non-empty text value"),
             ({**NEW_USER, "username": " "}, "username must be a non-empty text value"),
             ({**NEW_USER, "username": 9}, "username must be a non-empty text value"),
@@ -116,8 +132,7 @@ class AdminUserApiTest(AdminApiTestCase):
             with self.subTest(payload_keys=list(payload), error=error):
                 response = self.client.post(USERS_URL, headers=admin, json=payload)
                 self.assert_error(response, 400, error)
-
-        self.assertEqual(self.db.get_num_users(), 3)
+                self.assertEqual(self.stored_user_data(), before)
 
     def test_role_changes_take_effect_for_existing_tokens_and_keep_assignments(self):
         admin = self.headers["administrator"]
@@ -135,26 +150,35 @@ class AdminUserApiTest(AdminApiTestCase):
         self.assertTrue(self.db.can_access_camera("viewer-id", "cam"))
         self.assertFalse(self.db.can_access_camera("administrator-id", "cam"))
 
-        response = self.client.patch(
-            f"{USERS_URL}/administrator-id", headers=viewer, json={"role": "manager"}
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()["data"]["role"], "manager")
-        self.assert_error(
-            self.client.get(USERS_URL, headers=admin), 403, "Administrator role required"
-        )
-        self.assertFalse(self.db.can_access_camera("administrator-id", "cam"))
+        admin_url = f"{USERS_URL}/administrator-id"
+        for role in ("manager", "viewer"):
+            with self.subTest(new_role=role):
+                restored = self.client.patch(
+                    admin_url, headers=viewer, json={"role": "administrator"}
+                )
+                self.assertEqual(restored.status_code, 200)
+                self.assertEqual(self.client.get(USERS_URL, headers=admin).status_code, 200)
 
-        response = self.client.patch(
-            f"{USERS_URL}/administrator-id", headers=viewer, json={"role": "viewer"}
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()["data"]["role"], "viewer")
+                response = self.client.patch(admin_url, headers=viewer, json={"role": role})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.get_json()["data"]["role"], role)
+                self.assert_admin_requests_denied(
+                    admin, 403, "Administrator role required", admin_url
+                )
+                current_user = self.client.get("/api/v1/auth/me", headers=admin)
+                self.assertEqual(current_user.status_code, 200)
+                self.assertEqual(current_user.get_json()["data"]["role"], role)
+                self.assertEqual(current_user.get_json()["data"]["cameras"], [])
 
     def test_rejects_invalid_role_updates_and_reports_unknown_users(self):
         admin = self.headers["administrator"]
+        self.db.add_camera("cam", "Camera", "Entrance", "stream")
+        self.db.assign_camera("viewer-id", "cam")
+        before = self.stored_user_data()
+
         response = self.client.patch(VIEWER_URL, headers=admin, json=["viewer"])
         self.assert_error(response, 400, "Expected a JSON object")
+        self.assertEqual(self.stored_user_data(), before)
 
         for payload, error in (
             ({}, "Only the role field is supported"),
@@ -166,19 +190,25 @@ class AdminUserApiTest(AdminApiTestCase):
             with self.subTest(payload=payload):
                 response = self.client.patch(VIEWER_URL, headers=admin, json=payload)
                 self.assert_error(response, 400, error)
+                self.assertEqual(self.stored_user_data(), before)
 
         response = self.client.patch(
             f"{USERS_URL}/missing", headers=admin, json={"role": "viewer"}
         )
         self.assert_error(response, 404, "User does not exist")
-        self.assertEqual(self.db.get_user_by_id("viewer-id").role, "viewer")
+        self.assertEqual(self.stored_user_data(), before)
 
     def test_last_administrator_cannot_be_demoted(self):
         admin = self.headers["administrator"]
         url = f"{USERS_URL}/administrator-id"
+        before = self.stored_user_data()
+
         for role in ("manager", "viewer"):
-            response = self.client.patch(url, headers=admin, json={"role": role})
-            self.assert_error(response, 409, "Cannot demote the last administrator")
+            with self.subTest(attempted_role=role):
+                response = self.client.patch(url, headers=admin, json={"role": role})
+                self.assert_error(response, 409, "Cannot demote the last administrator")
+                self.assertEqual(self.stored_user_data(), before)
+                self.assertEqual(self.client.get(USERS_URL, headers=admin).status_code, 200)
 
         response = self.client.patch(url, headers=admin, json={"role": "administrator"})
         self.assertEqual(response.status_code, 200)
