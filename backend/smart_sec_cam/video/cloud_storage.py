@@ -1,4 +1,4 @@
-"""Durable, single-worker cloud sync. Local footage is never removed here."""
+"""Durable cloud sync: one-hour local buffer, thirty-day cloud retention."""
 import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
@@ -8,8 +8,16 @@ from smart_sec_cam.video.catalogue import media_file
 logger = logging.getLogger(__name__)
 
 
+LOCAL_RETENTION = timedelta(hours=1)
+CLOUD_RETENTION = timedelta(days=30)
+
+
 class LocalCopyUnavailable(ValueError):
-    """Cloud deletion is blocked until the retained local copy is available."""
+    """The local variant is missing or differs from its verified upload."""
+
+
+class CloudCopyUnavailable(ValueError):
+    """Local cleanup is blocked until the cloud copy is verified."""
 
 
 def utc_now():
@@ -30,9 +38,10 @@ class CloudQueue:
     acquire a hold before using a cloud copy and release it after completion.
     Holds deliberately survive crashes until explicitly released.
     """
-    def __init__(self, conn, root, store, cleanup=False):
+    def __init__(self, conn, root, store, cleanup=False, local_cleanup=False):
         self.conn, self.root, self.store = conn, root, store
         self.cleanup = cleanup
+        self.local_cleanup = local_cleanup
         self.setup()
 
     def setup(self):
@@ -60,6 +69,28 @@ class CloudQueue:
                 PRIMARY KEY(recording_id, owner)
             );
         ''')
+        columns = {row[1] for row in self.conn.execute('PRAGMA table_info(cloud_uploads)')}
+        with self.conn:
+            if 'local_deleted' not in columns:
+                self.conn.execute('ALTER TABLE cloud_uploads ADD COLUMN local_deleted INTEGER NOT NULL DEFAULT 0')
+            self.conn.execute('CREATE TABLE IF NOT EXISTS cloud_policy (name TEXT PRIMARY KEY)')
+            policy = 'local-1h-cloud-30d'
+            if not self.conn.execute('SELECT 1 FROM cloud_policy WHERE name=?', (policy,)).fetchone():
+                # Repair persisted one-hour cloud deadlines from the earlier
+                # reversed policy. Requeue expired/deleted objects for recovery.
+                rows = self.conn.execute('''SELECT u.recording_id,u.format,r.capture_end_utc
+                    FROM cloud_uploads u JOIN recordings r ON r.id=u.recording_id''').fetchall()
+                for rid, fmt, end in rows:
+                    capture = datetime.fromisoformat(end)
+                    if capture.tzinfo is None:
+                        raise ValueError('Capture time must include timezone')
+                    capture = capture.astimezone(timezone.utc)
+                    self.conn.execute('''UPDATE cloud_uploads SET expires_at=?,next_attempt=?,
+                        state=CASE WHEN state IN ('expired','deleted') THEN 'pending' ELSE state END,
+                        sha256=CASE WHEN state IN ('expired','deleted') THEN NULL ELSE sha256 END,
+                        last_error=NULL WHERE recording_id=? AND format=?''',
+                        ((capture + CLOUD_RETENTION).isoformat(), capture.isoformat(), rid, fmt))
+                self.conn.execute('INSERT INTO cloud_policy VALUES (?)', (policy,))
 
     def hold(self, recording_id, owner):
         if not owner:
@@ -84,7 +115,7 @@ class CloudQueue:
                 captured = datetime.fromisoformat(end)
                 if captured.tzinfo is None:
                     raise ValueError('Capture time must include timezone')
-                expires = captured.astimezone(timezone.utc) + timedelta(hours=1)
+                expires = captured.astimezone(timezone.utc) + CLOUD_RETENTION
                 self.conn.execute('''INSERT OR IGNORE INTO cloud_uploads
                     (recording_id,format,object_key,expires_at,next_attempt)
                     VALUES (?,?,?,?,?)''',
@@ -118,33 +149,43 @@ class CloudQueue:
                 now = utc_now().astimezone(timezone.utc)
             attempts = 0
             expired = False
-            expiry = (now + timedelta(hours=1)).isoformat()
+            expiry = (now + CLOUD_RETENTION).isoformat()
             try:
                 # Serialize workers and hold acquisition with the expiry check.
                 # Network calls are bounded by the S3 adapter's timeouts.
                 self.conn.execute('BEGIN IMMEDIATE')
                 row = self.conn.execute('''SELECT u.object_key,u.expires_at,u.state,
-                    u.attempts,v.path,v.size_bytes,u.sha256 FROM cloud_uploads u
+                    u.attempts,v.path,v.size_bytes,u.sha256,u.local_deleted,r.capture_end_utc FROM cloud_uploads u
                     JOIN recording_variants v USING(recording_id,format)
+                    JOIN recordings r ON r.id=u.recording_id
                     WHERE u.recording_id=? AND u.format=? AND u.next_attempt<=?''',
                     (rid, fmt, now.isoformat())).fetchone()
                 if not row or row[2] not in ('pending', 'uploaded', 'expired'):
                     self.conn.rollback()
                     continue
-                key, expiry, state, attempts, relative, size, verified_sha = row
+                key, expiry, state, attempts, relative, size, verified_sha, local_deleted, end = row
+                local_expiry = datetime.fromisoformat(end).astimezone(timezone.utc) + LOCAL_RETENTION
                 expired = datetime.fromisoformat(expiry) <= now
                 protected = self.protected(rid)
                 path = media_file(self.root, relative)
+                # Remove a buffered variant only after confirming its remote
+                # bytes still match the persisted successful upload checksum.
+                if (self.local_cleanup and state == 'uploaded' and not local_deleted
+                        and now >= local_expiry and not protected):
+                    if not verified_sha or self.store.sha256(key) != verified_sha:
+                        raise CloudCopyUnavailable('Cloud copy could not be verified')
+                    if path is not None:
+                        with path.open('rb') as local:
+                            if digest(local) != verified_sha:
+                                raise LocalCopyUnavailable('Local copy differs from verified upload')
+                        path.unlink()
+                    self.conn.execute('''UPDATE cloud_uploads SET local_deleted=1
+                        WHERE recording_id=? AND format=?''', (rid, fmt))
+                    local_deleted = True
                 if expired and not protected:
-                    # Delete deterministic keys even for pending rows: a worker
-                    # may have crashed after PUT but before its SQLite commit.
+                    # At thirty days, routine cloud footage expires independently
+                    # of the local buffer. Retry deterministic crash-leftover keys.
                     if self.cleanup:
-                        if path is None or path.stat().st_size != size:
-                            raise LocalCopyUnavailable('Retained local copy is missing or changed')
-                        if verified_sha:
-                            with path.open('rb') as local:
-                                if digest(local) != verified_sha:
-                                    raise LocalCopyUnavailable('Retained local checksum differs')
                         self.store.delete(key)
                         self._state(rid, fmt, 'deleted')
                     elif state == 'pending':
@@ -161,9 +202,12 @@ class CloudQueue:
                     self.conn.execute('''UPDATE cloud_uploads SET state='uploaded',
                         sha256=?,last_error=NULL WHERE recording_id=? AND format=?''',
                         (sha, rid, fmt))
-                # Completed uploads sleep until expiry; blocked expiry checks
-                # sleep one minute so older rows cannot starve new uploads.
-                next_check = max(now + timedelta(minutes=1), datetime.fromisoformat(expiry))
+                # Revisit uploaded rows at the local cutoff before the later
+                # cloud cutoff. A disabled/held cleanup gets another check in a minute.
+                next_check = datetime.fromisoformat(expiry)
+                if not local_deleted:
+                    next_check = min(next_check, local_expiry)
+                next_check = max(now + timedelta(minutes=1), next_check)
                 self.conn.execute('''UPDATE cloud_uploads SET next_attempt=?
                     WHERE recording_id=? AND format=?''',
                     (next_check.isoformat(), rid, fmt))
@@ -222,7 +266,8 @@ def queue_status(conn, now=None):
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cloud_uploads'"
     ).fetchone() is not None
     result = {'queue_ready': ready, 'states': states, 'failed': 0,
-              'due': 0, 'overdue': 0, 'holds': 0, 'verified_recent': 0}
+              'due': 0, 'overdue': 0, 'holds': 0, 'verified_recent': 0,
+              'local_removed': 0, 'local_retention_hours': 1, 'cloud_retention_days': 30}
     if not ready:
         return result
     states.update(dict(conn.execute('SELECT state,COUNT(*) FROM cloud_uploads GROUP BY state')))
@@ -235,5 +280,9 @@ def queue_status(conn, now=None):
         result[field] = conn.execute(
             'SELECT COUNT(*) FROM cloud_uploads WHERE ' + condition, params
         ).fetchone()[0]
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(cloud_uploads)')}
+    if 'local_deleted' in columns:
+        result['local_removed'] = conn.execute(
+            'SELECT COUNT(*) FROM cloud_uploads WHERE local_deleted=1').fetchone()[0]
     result['holds'] = conn.execute('SELECT COUNT(*) FROM cloud_holds').fetchone()[0]
     return result

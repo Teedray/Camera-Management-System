@@ -68,7 +68,9 @@ def main(argv=None):
     parser.add_argument('--database', default='data/smart-sec-cam.db',
                         help='Shared application SQLite database path')
     parser.add_argument('--enable-cleanup', action='store_true',
-                        help='Delete expired routine cloud objects; keeps local and incident files')
+                        help='Delete routine cloud objects after 30 days; protects holds and incidents')
+    parser.add_argument('--enable-local-cleanup', action='store_true',
+                        help='Remove local variants after 1 hour only with a verified cloud copy')
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO)
     if args.status:
@@ -107,7 +109,8 @@ def main(argv=None):
     db.conn = conn
     root = os.getenv('VIDEO_DIR', 'data/videos')
     try:
-        queue = CloudQueue(conn, root, store, cleanup=args.enable_cleanup)
+        queue = CloudQueue(conn, root, store, cleanup=args.enable_cleanup,
+                           local_cleanup=args.enable_local_cleanup)
         while True:
             try:
                 import_completed(db, root)
