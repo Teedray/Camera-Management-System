@@ -65,7 +65,7 @@ export default function VideoPlayer(props) {
         }
     }
 
-    function usePlaybackTime(setTime) {
+    function copyPlaybackTime(setTime) {
         const time = player.current?.getCurrentTime();
         if (Number.isFinite(time)) setTime(String(time));
     }
@@ -80,13 +80,13 @@ export default function VideoPlayer(props) {
                         <input type="number" min="0" max={duration ?? undefined} step="any"
                             required value={start} onChange={event => setStart(event.target.value)} />
                     </label>
-                    <button type="button" onClick={() => usePlaybackTime(setStart)}>Use current time for start</button>
+                    <button type="button" onClick={() => copyPlaybackTime(setStart)}>Use current time for start</button>
                     <label>
                         End (seconds)
                         <input type="number" min="0" max={duration ?? undefined} step="any"
                             required value={end} onChange={event => setEnd(event.target.value)} />
                     </label>
-                    <button type="button" onClick={() => usePlaybackTime(setEnd)}>Use current time for end</button>
+                    <button type="button" onClick={() => copyPlaybackTime(setEnd)}>Use current time for end</button>
                     <button type="submit">Download MP4</button>
                 </fieldset>
                 <p role="status">{status}</p>
