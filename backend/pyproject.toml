@@ -36,6 +36,10 @@ detector = [
     "numpy >= 1.22.0",
     "imutils >= 0.5.4"
 ]
+recorder = [
+    "opencv-python-headless >= 4.5.5",
+    "numpy >= 1.22.0"
+]
 server = [
     "flask ~= 2.3.3",
     "flask-cors ~= 3.0.10",

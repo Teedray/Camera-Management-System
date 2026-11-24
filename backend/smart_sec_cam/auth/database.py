@@ -110,7 +110,68 @@ class AuthDatabase:
                 "CHECK (role IN ('administrator', 'manager', 'viewer'))"
             )
 
+        # Camera connection details and status (SR-01-01).
+        camera_columns = {
+            row[1] for row in cursor.execute("PRAGMA table_info(cameras)")
+        }
+        if "stream_address" not in camera_columns:
+            cursor.execute("ALTER TABLE cameras ADD COLUMN stream_address TEXT")
+        if "last_seen_utc" not in camera_columns:
+            cursor.execute("ALTER TABLE cameras ADD COLUMN last_seen_utc TEXT")
+
         self.conn.commit()
+
+    CAMERA_STATUS_FIELDS = (
+        "id", "name", "location", "channel_name", "enabled",
+        "stream_address", "last_seen_utc"
+    )
+
+    def get_camera(self, camera_id):
+        row = self.conn.execute(
+            "SELECT " + ", ".join(self.CAMERA_STATUS_FIELDS) + " FROM cameras WHERE id = ?",
+            (camera_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        camera = dict(zip(self.CAMERA_STATUS_FIELDS, row))
+        camera["enabled"] = bool(camera["enabled"])
+        return camera
+
+    def get_user_camera_details(self, user_id):
+        """Assigned, enabled cameras including stream address and last frame time."""
+        rows = self.conn.execute(
+            "SELECT " + ", ".join("c." + field for field in self.CAMERA_STATUS_FIELDS) + " "
+            "FROM cameras c JOIN user_cameras uc ON uc.camera_id = c.id "
+            "WHERE uc.user_id = ? AND c.enabled = 1 ORDER BY c.name, c.id",
+            (user_id,)
+        ).fetchall()
+        cameras = []
+        for row in rows:
+            camera = dict(zip(self.CAMERA_STATUS_FIELDS, row))
+            camera["enabled"] = bool(camera["enabled"])
+            cameras.append(camera)
+        return cameras
+
+    def update_camera(self, camera_id, **fields):
+        """Update name, location or stream_address; returns False if the camera is unknown."""
+        allowed = {"name", "location", "stream_address"}
+        if not fields or set(fields) - allowed:
+            raise ValueError("Only name, location and stream_address can be updated")
+        assignments = ", ".join(f"{field} = ?" for field in fields)
+        with self.conn:
+            updated = self.conn.execute(
+                f"UPDATE cameras SET {assignments} WHERE id = ?",
+                (*fields.values(), camera_id)
+            ).rowcount
+        return bool(updated)
+
+    def mark_camera_seen(self, channel_name, seen_at_utc: str):
+        """Record the time of the latest frame from a camera channel."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE cameras SET last_seen_utc = ? WHERE channel_name = ?",
+                (seen_at_utc, channel_name)
+            )
 
     def add_user(self, user: User):
         with self.conn:

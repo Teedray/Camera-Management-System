@@ -31,9 +31,20 @@ class VideoWriter:
             self.first_frame_time = time.monotonic()
         self.frame_buffer.append(resized_frame)
 
-    def write(self):
-        capture_end = datetime.datetime.now(datetime.timezone.utc)
-        fps = max(1, self._calculate_fps())
+    def write(self, capture_start: datetime.datetime = None,
+              capture_end: datetime.datetime = None, fps: float = None) -> str:
+        """Encode the buffered frames, queue them for cataloguing and return the recording ID.
+
+        Continuous recording passes the segment's real UTC capture interval and
+        frame rate (SR-01-02/03); motion-triggered callers keep the defaults,
+        which measure them from the wall clock.
+        """
+        if capture_start is not None:
+            self.capture_start = capture_start
+        if capture_end is None:
+            capture_end = datetime.datetime.now(datetime.timezone.utc)
+        if fps is None:
+            fps = max(1, self._calculate_fps())
         recording_id = uuid.uuid4().hex
         root = Path(self.video_dir)
         directory = root / MEDIA_DIR / recording_id
@@ -71,6 +82,7 @@ class VideoWriter:
         marker.write_text(json.dumps(manifest))
         marker.rename(pending / (recording_id + ".json"))
         self._clear_frame_buffer()
+        return recording_id
 
     def reset(self):
         self._clear_frame_buffer()

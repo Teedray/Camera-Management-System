@@ -25,17 +25,17 @@ services:
     depends_on:
       - redis
     restart: always
-  motion-detection:
-    image: "ghcr.io/scottbarnesg/smart-sec-cam/sec-cam-motion:latest"
+  recorder:
+    image: "ghcr.io/scottbarnesg/smart-sec-cam/sec-cam-recorder:latest"
     build:
       context: backend/
-      dockerfile: smart_sec_cam/motion/Dockerfile
-    command: python smart_sec_cam/motion/main.py --redis-url redis --video-dir /backend/data/videos/
+      dockerfile: smart_sec_cam/recording/Dockerfile
+    # Continuous 30-second segments for every camera (F01, SR-01-02).
+    command: python smart_sec_cam/recording/main.py --redis-url redis --video-dir /backend/data/videos/
     volumes:
       - ./data/videos/:/backend/data/videos/
     environment:
       - PYTHONUNBUFFERED=1
-      - MOTION_THRESHOLD=10000
     depends_on:
       - redis
     restart: always

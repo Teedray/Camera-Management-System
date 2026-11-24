@@ -1,10 +1,12 @@
 import base64
+import ipaddress
 import json
 import os
 import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from functools import wraps
+from urllib.parse import urlsplit
 from numbers import Real
 from pathlib import Path
 
@@ -23,7 +25,9 @@ from smart_sec_cam.auth.authentication import Authenticator
 from smart_sec_cam.auth.database import AuthDatabase, LastAdministratorError
 from smart_sec_cam.auth.models import User
 from smart_sec_cam.redis import RedisImageReceiver
-from smart_sec_cam.video.catalogue import assigned_variants, import_completed, media_file
+from smart_sec_cam.video.catalogue import (
+    assigned_variants, camera_segments, find_gaps, import_completed, media_file
+)
 from smart_sec_cam.video.incident_clips import IncidentClipManager
 from smart_sec_cam.video.incident_database import IncidentDatabase
 
@@ -41,6 +45,14 @@ VIDEO_DIR = "data/videos"
 INCIDENT_ARCHIVE_DIR = "data/incident_archive"
 # Roles allowed to save incident clips (UC04 precondition, SEC-01).
 INCIDENT_ROLES = ("administrator", "manager")
+# A camera counts as connected if a frame arrived within this many seconds (SR-01-01).
+CAMERA_CONNECTED_SECONDS = 10
+# Throttle for persisting each camera's last-frame time.
+LAST_SEEN_WRITE_SECONDS = 5
+# Longest window a single recordings/gaps query may cover.
+MAX_RECORDING_QUERY = timedelta(days=31)
+DEFAULT_RECORDING_QUERY = timedelta(hours=1)
+last_seen_writes = {}
 rooms = {}
 live_subscriptions = {}
 ENABLE_USER_REGISTRATION = False
@@ -171,6 +183,68 @@ def visible_incident(user_id, incident_id):
         if incident["id"] == incident_id:
             return incident
     return None
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def note_camera_frame(channel, now=None):
+    """Persist a camera's latest frame time, at most every LAST_SEEN_WRITE_SECONDS."""
+    if isinstance(channel, bytes):
+        channel = channel.decode("utf-8", errors="replace")
+    now = now or utc_now()
+    previous = last_seen_writes.get(channel)
+    if previous is not None and (now - previous).total_seconds() < LAST_SEEN_WRITE_SECONDS:
+        return
+    last_seen_writes[channel] = now
+    try:
+        auth_db.mark_camera_seen(channel, now.isoformat())
+    except sqlite3.Error:
+        app.logger.exception("Could not record last frame time for %s", channel)
+
+
+def camera_status(camera, now=None):
+    """connected / disconnected / never_connected, from the last frame time (SR-01-01)."""
+    last_seen = camera.get("last_seen_utc")
+    if not last_seen:
+        return "never_connected"
+    age = ((now or utc_now()) - datetime.fromisoformat(last_seen)).total_seconds()
+    return "connected" if age <= CAMERA_CONNECTED_SECONDS else "disconnected"
+
+
+def validate_stream_address(value):
+    """Return an error message, or None for a USB index or an http/https/rtsp stream URL."""
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        return "stream_address must be a non-empty text value"
+    value = value.strip()
+    if value.isdigit():
+        return None
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname
+        parts.port  # Raises ValueError for an invalid port.
+    except ValueError:
+        return "stream_address has an invalid host or port"
+    if parts.scheme not in ("http", "https", "rtsp") or not host:
+        return "stream_address must be a USB camera number or an http, https or rtsp URL"
+    if all(part.isdigit() for part in host.split(".")):
+        try:
+            ipaddress.IPv4Address(host)
+        except ValueError:
+            return "stream_address has an invalid IP address"
+    return None
+
+
+def parse_utc(value, name):
+    """Parse an ISO 8601 timestamp that includes a UTC offset."""
+    try:
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        raise ValueError(f"{name} must be an ISO 8601 timestamp")
+    if moment.tzinfo is None:
+        raise ValueError(f"{name} must include a timezone offset, for example Z")
+    return moment.astimezone(timezone.utc)
 
 
 """
@@ -574,6 +648,111 @@ def register_camera():
     return jsonify(success=True, data={**camera, "enabled": True}), 201
 
 
+@app.route("/api/v1/cameras/status", methods=["GET"])
+@require_token
+def list_camera_status():
+    """Connection status of the caller's cameras; stream addresses are admin-only."""
+    now = utc_now()
+    is_admin = g.current_user.role == "administrator"
+    items = []
+    for camera in auth_db.get_user_camera_details(g.current_user.user_id):
+        item = {
+            "id": camera["id"],
+            "name": camera["name"],
+            "location": camera["location"],
+            "channel_name": camera["channel_name"],
+            "status": camera_status(camera, now),
+            "last_seen_utc": camera["last_seen_utc"],
+        }
+        if is_admin:
+            item["stream_address"] = camera["stream_address"]
+        items.append(item)
+    return jsonify(success=True, data={"items": items}), 200
+
+
+@app.route("/api/v1/cameras/<camera_id>", methods=["PATCH"])
+@require_administrator
+def update_camera(camera_id):
+    """Update camera details without code changes, validated first (SR-01-01, SQR-04)."""
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or not payload:
+        return jsonify(success=False, error="Expected a non-empty JSON object"), 400
+    if payload.keys() - {"name", "location", "stream_address"}:
+        return jsonify(
+            success=False, error="Only name, location and stream_address can be changed"
+        ), 400
+
+    fields = {}
+    for field in ("name", "location"):
+        if field in payload:
+            value = payload[field]
+            if not isinstance(value, str) or not value.strip() or "\x00" in value:
+                return jsonify(success=False, error=f"{field} must be a non-empty text value"), 400
+            fields[field] = value.strip()
+    if "stream_address" in payload:
+        error = validate_stream_address(payload["stream_address"])
+        if error:
+            return jsonify(success=False, error=error), 400
+        fields["stream_address"] = payload["stream_address"].strip()
+
+    if not auth_db.update_camera(camera_id, **fields):
+        return jsonify(success=False, error="Camera does not exist"), 404
+    camera = auth_db.get_camera(camera_id)
+    return jsonify(success=True, data={**camera, "status": camera_status(camera)}), 200
+
+
+@app.route("/api/v1/cameras/<camera_id>/recordings", methods=["GET"])
+@require_token
+def list_camera_recordings(camera_id):
+    """Catalogued 30-second segments and recording gaps for one camera (SR-01-03)."""
+    if not auth_db.can_access_camera(g.current_user.user_id, camera_id):
+        return jsonify(success=False, error="Camera does not exist"), 404
+
+    now = utc_now()
+    try:
+        end = parse_utc(request.args["end"], "end") if "end" in request.args else now
+        start = (
+            parse_utc(request.args["start"], "start") if "start" in request.args
+            else end - DEFAULT_RECORDING_QUERY
+        )
+    except ValueError as error:
+        return jsonify(success=False, error=str(error)), 400
+    if start >= end:
+        return jsonify(success=False, error="start must be before end"), 400
+    if end - start > MAX_RECORDING_QUERY:
+        return jsonify(success=False, error="The requested range cannot exceed 31 days"), 400
+
+    import_completed(auth_db, VIDEO_DIR)
+    # Only segments whose files are still present count as recorded footage;
+    # deleted or missing files show up as gaps instead.
+    segments = [
+        segment for segment in camera_segments(auth_db, camera_id, start, end)
+        if "mp4" in segment["paths"] and media_file(VIDEO_DIR, segment["paths"]["mp4"]) is not None
+    ]
+    # Time after "now" is not missing footage yet.
+    gaps = find_gaps(segments, start, min(end, now))
+
+    camera = auth_db.get_camera(camera_id)
+    return jsonify(success=True, data={
+        "camera": {"id": camera["id"], "name": camera["name"],
+                   "status": camera_status(camera, now), "last_seen_utc": camera["last_seen_utc"]},
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "segments": [{
+            "id": segment["id"],
+            "start": segment["start"].isoformat(),
+            "end": segment["end"].isoformat(),
+            "duration_seconds": (segment["end"] - segment["start"]).total_seconds(),
+            "files": segment["files"],
+        } for segment in segments],
+        "gaps": [{
+            "start": gap["start"].isoformat(),
+            "end": gap["end"].isoformat(),
+            "seconds": gap["seconds"],
+        } for gap in gaps],
+    }), 200
+
+
 @app.route("/api/v1/users/<user_id>/cameras/<camera_id>", methods=["PUT", "DELETE"])
 @require_administrator
 def update_camera_assignment(user_id, camera_id):
@@ -773,6 +952,7 @@ def listen_for_images(redis_url: str, redis_port: int):
                 # Preserve the existing frontend's room naming.
                 room = str(channel)
                 rooms[room] = time.time()
+                note_camera_frame(channel)
                 deliver_live_frame(channel, image)
 
         eventlet.sleep(0.001)
