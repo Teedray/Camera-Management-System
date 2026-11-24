@@ -3,3 +3,8 @@
 // expect(element).toHaveTextContent(/react/i)
 // learn more: https://github.com/testing-library/jest-dom
 import '@testing-library/jest-dom';
+
+// Pages need a login cookie, as in the real app. Tests start signed in as the demo owner.
+beforeEach(() => {
+  document.cookie = "token=mock-token:owner; path=/";
+});

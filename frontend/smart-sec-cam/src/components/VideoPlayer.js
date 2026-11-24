@@ -22,8 +22,9 @@ export default function VideoPlayer(props) {
 
     async function downloadClip(event) {
         event.preventDefault();
+        if (!props.canExport) return;
         if (pendingDownload.current) return;
-        if (start === "" || end === "" || Number(start) >= Number(end)) {
+        if (start === "" || end === "" || !Number.isFinite(Number(start)) || !Number.isFinite(Number(end)) || Number(start) < 0 || Number(start) >= Number(end) || duration == null || Number(end) > duration) {
             setStatus("Enter an end time greater than the start time.");
             return;
         }
@@ -72,7 +73,7 @@ export default function VideoPlayer(props) {
 
     return (
         <>
-            <form onSubmit={downloadClip} aria-label="Trim and download recording">
+            {props.canExport && <form onSubmit={downloadClip} aria-label="Trim and download recording">
                 <fieldset disabled={processing}>
                     <legend>Trim and download</legend>
                     <label>
@@ -90,8 +91,10 @@ export default function VideoPlayer(props) {
                     <button type="submit">Download MP4</button>
                 </fieldset>
                 <p role="status">{status}</p>
-            </form>
-            <ReactPlayer ref={player} url={videoUrl} width="100%" height="90vh" controls
+            </form>}
+            {!props.canExport && <p role="status">{status}</p>}
+            <ReactPlayer ref={player} url={videoUrl} width="100%" height="90vh" controls config={{file:{attributes:{controlsList: "nodownload"}}}}
+                onError={() => setStatus("Recording unavailable or playback failed.")}
                 onDuration={seconds => { if (Number.isFinite(seconds)) setDuration(seconds); }} />
         </>
     );
