@@ -28,6 +28,7 @@ where = ["."]
 
 [project.optional-dependencies]
 cloud = ["boto3 >= 1.34, < 2"]
+drive = ["google-api-python-client >= 2, < 3", "google-auth-oauthlib >= 1, < 2"]
 streamer = [
     "opencv-python-headless >= 4.5.5",
     "numpy == 1.24.2"

@@ -47,9 +47,9 @@ class WorkerTests(unittest.TestCase):
         for endpoint in ('', 'http://example.com', 'https://user:secret@example.com',
                          'https://example.com/bucket', 'https://example.com?secret=x'):
             with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
-                configured_store({'CLOUD_ENDPOINT_URL': endpoint, 'CLOUD_BUCKET': 'test'})
+                configured_store({'CLOUD_PROVIDER': 's3', 'CLOUD_ENDPOINT_URL': endpoint, 'CLOUD_BUCKET': 'test'})
         with self.assertRaises(ValueError):
-            configured_store({'CLOUD_ENDPOINT_URL': 'https://example.com'})
+            configured_store({'CLOUD_PROVIDER': 's3', 'CLOUD_ENDPOINT_URL': 'https://example.com'})
 
     def test_status_is_read_only_and_needs_no_credentials_or_sdk(self):
         with tempfile.TemporaryDirectory() as directory:

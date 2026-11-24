@@ -26,6 +26,6 @@ RUN chmod +x /backend/smart_sec_cam/server/docker-entrypoint.sh
 COPY --from=build-static /frontend/build/ /backend/build
 
 RUN python -m pip install --upgrade pip
-RUN python -m pip install .[server]
+RUN python -m pip install '.[server,drive]'
 
 ENTRYPOINT /backend/smart_sec_cam/server/docker-entrypoint.sh

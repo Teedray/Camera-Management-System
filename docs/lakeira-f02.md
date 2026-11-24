@@ -1,199 +1,186 @@
-# F02: rolling cloud storage
+# F02: Google Drive rolling storage
 
-Lakeira's branch: `feature/lakeira-rolling-cloud-storage`, based on
-`merge/database-rba-incident-clips`. The initial implementation is commit `eb19d87`.
+The agreed design is **Google Drive (Google One account storage), MP4-only cloud
+uploads, a one-hour local buffer, and thirty days of routine cloud recordings**.
+The recorder, SQLite database, and website still run on the on-site computer.
+Google Drive is storage for the application, not its application server.
 
-## What works
+## Implemented
 
-The independent worker imports completed recorder manifests and discovers both
-catalogue variants, including recordings registered before startup. SQLite keeps
-upload state, failed-attempt counts, retry deadlines, checksum, and error class.
-Deterministic `routine/<recording-id>/clip.<format>` keys make retries idempotent.
-Uploaded bytes are downloaded and SHA-256 checked before success is recorded.
-This costs an extra read per upload and must be measured on the reference network.
+- Completed catalogue MP4 variants are uploaded using the Drive API. WebM remains
+  a local compatibility encoding and is not uploaded by the default worker.
+- The local Drive index reserves a generated file ID before uploading. Retries
+  after an uncertain response reuse that ID. App-specific metadata allows recovery
+  if index entries are lost; ambiguous duplicates fail instead of picking a copy.
+- Uploaded bytes are read back and SHA-256 verified before success is recorded.
+- Local cleanup can remove both local encodings after one hour, only after the
+  MP4 cloud copy is verified again. Failed uploads remain buffered beyond an hour.
+- Routine cloud copies expire thirty days after capture end. Outage recovery never
+  gives old footage a fresh thirty-day window. Active holds protect both tiers.
+- Separate saved incident archives are outside routine cleanup. Local incident
+  extraction takes a job hold. A manager can also save an incident from a verified
+  cloud-only source; its temporary copy is removed after extraction.
+- Recording lists include authorized cloud-only MP4 files. Playback passes through
+  Flask, rechecks current camera assignments, verifies the downloaded bytes, and
+  supports HTTP byte ranges. The frontend requests MP4 on all browsers.
+- No public Drive links or sharing grants are created. The configured folder must
+  be owned only by the dedicated account. The application requests `drive.file`,
+  which limits it to files it creates or the user explicitly opens with it.
 
-## Retention policy
+## 1. Create the Google API credentials
 
-The user-confirmed assignment requirement is **one hour locally and thirty days
-in the cloud**, measured from capture end. Earlier versions of this document
-reversed those periods; those descriptions are superseded.
+Use the dedicated Google account that owns the agreed storage plan. In
+[Google Cloud Console](https://console.cloud.google.com/), select or create the
+team's project, enable **Google Drive API**, and configure its OAuth consent
+settings. Create an OAuth client with application type **Desktop app** and
+download its client JSON. Follow the [official Python quickstart](https://developers.google.com/workspace/drive/api/quickstart/python)
+for current Console navigation. Account creation, terms, consent, and purchases
+must be completed by the account owner.
 
-| Tier | Routine retention | Safety conditions |
-| --- | --- | --- |
-| Local recording buffer | 1 hour | Remove a variant only after its cloud upload has succeeded and its current cloud SHA-256 matches the verified upload. Failed uploads remain buffered beyond an hour. |
-| Routine cloud recordings | 30 days | Delete at the capture-based deadline, unless an incident reference or active job holds the recording. Local copies are not required at the cloud deadline. |
-| Saved incidents and active jobs | Protected | Separate incident archives are untouched. Recording holds protect both formats in both tiers. |
+Store the JSON as `backend/data/drive-client.json` in your normal Git clone.
+`data/` and `.env.cloud` are ignored by Git. Never paste the client JSON, token
+JSON, or refresh token into chat or commit them. The runtime uses user OAuth;
+a service-account key is not a substitute for the Google One account login.
 
-Delayed uploads keep the original thirty-day deadline; a two-day-old recording
-still has twenty-eight days remaining, rather than a new thirty-day window.
-Routine recordings already thirty days old are not uploaded. Both cleanup modes
-remain disabled by default. Cloud cleanup and local cleanup have separate flags.
-Local corruption or an unavailable/corrupt cloud copy blocks local removal and
-records an error. A missing local file does not block normal cloud expiry.
+For a prototype with the OAuth app in **Testing**, add the dedicated account as a
+test user. Testing authorizations for Drive scopes expire after seven days;
+resolve the app's production-readiness/consent requirements before relying on
+unattended continuous operation. See [Google's app audience documentation](https://support.google.com/cloud/answer/15549945).
 
-On first startup with this policy, the worker migrates previously stored one-hour
-cloud deadlines to capture end plus thirty days. It requeues expired/deleted rows
-so local variants can restore any prematurely removed cloud objects. This cannot
-recover footage if both copies were already lost. The migration runs only once
-and preserves subsequent retry schedules and verified upload checksums.
+## 2. Authorize and create the private application folder
 
-`CloudQueue.hold(recording_id, owner)` protects both formats for save/export work.
-Acquire it before accessing footage, and release it after the job finishes.
-Holds survive crashes and need explicit recovery. Legacy incident records that
-reference original filenames also protect their recording pair. Separate saved
-incident archives are never scanned by cleanup.
+From your repository root on macOS:
 
-**Playback integration remains pending.** Current API playback reads local
-files. Keep local cleanup disabled in deployment until authorized cloud playback
-is connected, so footage older than one hour remains reviewable. The local
-cleanup flag is provided for isolated retention tests first.
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install './backend[server,drive]'
+cd backend
+python -m smart_sec_cam.video.drive_auth --client-secrets data/drive-client.json
+```
 
-## 1. Prepare the private R2 bucket
+The helper opens Google's sign-in/consent flow on localhost. Select the dedicated
+account and approve the displayed per-file Drive permissions yourself. It writes
+`data/drive-token.json` with owner-only permissions and creates a new private
+application folder. Copy the printed `DRIVE_FOLDER_ID` value. An arbitrary folder
+created manually in Drive is not automatically available under `drive.file`.
+Do not share this application folder.
 
-In the team's Cloudflare account, create or select the prototype bucket. Keep
-**r2.dev public access disabled** and do not attach a public custom domain. Create
-an **Object Read & Write** R2 credential scoped to that bucket. Keep the Access
-Key ID and Secret Access Key locally; do not paste them into chat or commit them.
-The account endpoint is typically
-`https://<ACCOUNT_ID>.r2.cloudflarestorage.com`; copy the exact endpoint from the
-account, including a jurisdiction-specific endpoint if applicable.
+The helper refuses to overwrite an existing token. If setup succeeds, reuse its
+folder and token rather than creating new authorizations for every worker run.
+If folder creation fails after the token is saved, keep the token safe and recover
+setup explicitly rather than deleting credentials blindly.
 
-References: [R2 S3 setup](https://developers.cloudflare.com/r2/get-started/s3/) and
-[R2 API credentials](https://developers.cloudflare.com/r2/api/tokens/).
+## 3. Configure both server and worker
 
-For other S3-compatible providers, use an **unversioned private bucket**.
-Versioned S3 buckets retain old versions after a normal delete; this worker does
-not remove them. Do not add a blanket lifecycle rule that could bypass holds.
-Bucket privacy and versioning must be checked manually: `--check` tests object
-operations, not account policy or public domains.
-
-## 2. Configure and test from macOS Terminal
-
-From the root of your normal Git clone:
+From the repository root:
 
 ```sh
 cp .env.cloud.example .env.cloud
 open -e .env.cloud
 ```
 
-Replace the placeholders and enter the bucket-scoped keys in that local file.
-`.env.cloud` is excluded from Git and Docker build contexts. Then create an
-isolated environment and install only the worker dependencies:
+Set `DRIVE_FOLDER_ID` to the printed folder ID. The token and index paths in the
+example are relative to `backend/`, which is also the Docker working directory.
+Load the settings before starting either Flask or the worker:
 
 ```sh
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install './backend[cloud]'
 set -a
 source .env.cloud
 set +a
 cd backend
 python -m smart_sec_cam.video.cloud_worker --check
-```
-
-`--check` uploads one small random `health-check/<id>.txt` object, reads it back,
-compares SHA-256, and requests deletion. It always attempts deletion even after
-an uncertain upload or corrupt read. If deletion fails, its temporary key is
-reported for manual removal. No routine footage or incident object is touched.
-The check does not need the application database or a running camera.
-
-Once the application has created its shared database and completed recordings:
-
-```sh
 python -m smart_sec_cam.video.cloud_worker --status
 python -m smart_sec_cam.video.cloud_worker --once
+```
+
+`--check` uploads a small random `health-check` object, reads and hashes it, and
+requests deletion, including after a lost upload response. The check needs no
+camera or application database, and does not touch footage. If deletion fails,
+its temporary key is logged for recovery. The worker/status modes need the shared
+application database initialized by Flask; `--database` overrides its location.
+The worker refuses to create an empty database when started in the wrong folder.
+
+Run continuously with cleanup disabled initially:
+
+```sh
 python -m smart_sec_cam.video.cloud_worker
 ```
 
-Run from the same `backend/` directory as Flask, or provide `--database` and
-`VIDEO_DIR` explicitly. The worker refuses to create an empty database if started
-from the wrong directory. `--once` exits nonzero if recorded failures remain.
-`--status` reads the database without changing it and requires no credentials or
-SDK. It reports pending/uploaded/expired/deleted variant counts, failed rows, due
-work, past-expiry rows, active holds, removed local variants, and verified uploads
-within the thirty-day cloud window. It also states both retention periods. `overdue`
-includes held copies and copies retained while cleanup is disabled; it is not a
-count of policy violations. Counts refer to file variants, not logical recordings.
-
-Enable routine **cloud** expiry after thirty days explicitly:
-
-```sh
-python -m smart_sec_cam.video.cloud_worker --enable-cleanup
-```
-
-For isolated retention tests, or after authorized cloud playback is implemented,
-add local cleanup of verified variants after one hour:
+After the real upload/playback/outage checks succeed, explicitly enable the two
+cleanup operations:
 
 ```sh
 python -m smart_sec_cam.video.cloud_worker --enable-cleanup --enable-local-cleanup
 ```
 
-## 3. Optional Docker worker
+`--enable-cleanup` permanently deletes expired routine Drive files after thirty
+days; it does not move them to Trash. `--enable-local-cleanup` removes verified
+local encoding pairs after one hour. Both flags are off by default. Neither flag
+scans the incident archive. Inspect and recover stale job holds after a crash;
+holds have no automatic timeout that might interrupt active work.
 
-A separate image avoids rebuilding the frontend just to run cloud sync. Docker
-Desktop is required. From the repository root, after creating `.env.cloud`:
+Keep `data/drive-index.db` alongside the shared database in backups. A cloud queue
+is bound to its destination folder/provider so a worker cannot assume a verified
+S3 object exists on Drive. An existing uploaded queue without a provider binding,
+or one bound elsewhere, requires explicit migration and verification. Do not
+change folder/provider and enable cleanup on an old live database.
+
+## 4. Optional Docker deployment
+
+Authorize on the host first. With `.env.cloud` configured and the server's shared
+`data/` already initialized, from the repository root:
 
 ```sh
-docker compose -f docker-compose.yml -f compose.cloud.yml build cloud-worker
+docker compose -f docker-compose.yml -f compose.cloud.yml build server cloud-worker
 docker compose -f docker-compose.yml -f compose.cloud.yml run --rm cloud-worker --check
-```
-
-Once the server has initialized the shared database:
-
-```sh
-docker compose -f docker-compose.yml -f compose.cloud.yml up -d cloud-worker
+docker compose -f docker-compose.yml -f compose.cloud.yml up -d server cloud-worker
 docker compose -f docker-compose.yml -f compose.cloud.yml run --rm cloud-worker --status
-docker compose -f docker-compose.yml -f compose.cloud.yml logs --tail=30 cloud-worker
 ```
 
-`compose.cloud.yml` is opt-in and uses the same `./data` volume as the server.
-Its default command keeps both cleanup modes disabled. To run one cloud cleanup
-pass at the thirty-day deadline:
+The optional Compose file passes the same Drive settings to Flask and the worker.
+Both mount `./data` so they share the catalogue, token, and Drive index. Run only
+one sync worker; do not overlap a continuous worker with one-shot sync passes.
+Status-only processes are safe while syncing.
+
+## Tests and remaining live checks
 
 ```sh
-docker compose -f docker-compose.yml -f compose.cloud.yml run --rm cloud-worker --once --enable-cleanup
+PYTHONPATH=backend .venv/bin/python -m unittest discover -s backend/tests -v
 ```
 
-Run only one worker. Remote operations currently hold SQLite's write lock so that
-cleanup and holds serialize. Connection/read timeouts bound individual network
-requests; uploads can still delay API writes. The worker checks at one-minute
-intervals and processes up to 100 due variants per pass. Validate throughput and
-cleanup latency; a leased queue and shorter scheduling interval are follow-ups
-before scaling. Do not run overlapping continuous and one-shot sync workers.
-A status-only process is safe while the worker is running.
+The suite exercises recorded media, catalogue/API permissions, incident creation,
+retention boundaries, MP4-only uploads, duplicate-safe Drive retries, local pair
+cleanup, temporary holds, cloud listing/playback/ranges, revocation, expired and
+corrupt footage, and incidents saved from cloud-only sources. Drive tests use
+mocked API responses, not a real Google account.
 
-## Tests
+Before enabling cleanup, verify with the team's account and real cameras:
 
-From the repository root:
+1. The connection check and upload/read-back of actual recordings succeed.
+2. MP4 remains listed, playable, and available for incident saving after local
+   cleanup. Revoked assignments deny subsequent playback/range requests.
+3. An internet outage retains local footage and pending jobs; reconnecting uploads
+   each pending MP4 to its original deadline without duplicate files.
+4. Timestamp fixtures demonstrate thirty-day expiry and incident/job protection.
+5. Actual four-camera bitrate, available account storage, upload bandwidth, API
+   usage, and OAuth renewal meet the agreed operating needs.
 
-```sh
-PYTHONPATH=backend python3 -m unittest discover -s backend/tests -p 'test_cloud*.py' -v
-```
+The backend currently downloads and verifies a whole clip into temporary storage
+before returning even a range response. This preserves integrity and authorization
+without public links, but adds latency and repeated downloads during seeking.
+Measure it before claiming playback/seek timing targets. Temporary files close
+with responses; they are not a permanent playback cache.
 
-These tests use isolated SQLite databases, an in-memory object store, and a mocked
-S3 client. They cover durable retry recovery, capture-based deadlines, checksum
-failure, the exact one-hour local and thirty-day cloud boundaries, local copy
-corruption, remote-copy verification, holds, incident references, policy migration,
-crash-leftover cleanup, delete outages, queue fairness, configuration validation,
-connection-check cleanup, stream closure, and read-only status. They do not
-contact a real provider or certify bucket privacy. Docker configuration/image
-validation and the rest of the application suite require their dependencies.
+The worker polls once per minute and handles at most 100 due variants per pass.
+Remote operations still hold SQLite's write lock, so busy uploads may delay API
+writes. Validate throughput and cleanup timing before production. Separate cloud
+backup of saved incidents is not part of routine MP4 retention and remains a
+separate acceptance item.
 
-## Remaining acceptance work
+## Optional S3 compatibility
 
-1. Run the connection check against the team's private bucket, then upload real
-   catalogue segments and verify timings on the reference network.
-2. Test a ten-minute network outage, restore connectivity, and verify each pending
-   recent variant once. Check status while offline and after recovery.
-3. Connect cloud playback behind the existing current-camera authorization check.
-   This worker exposes no public or presigned playback URLs. Local playback stays
-   available until local cleanup is enabled; afterward older footage needs the
-   authorized cloud retrieval path.
-4. Wire holds into future cloud-dependent incident/export jobs and add an
-   authenticated operational dashboard and buffer-pressure alerts.
-5. Validate the confirmed one-hour local/thirty-day cloud policy against real
-   footage, including the exception that failed uploads stay local. Separate
-   incident backup is not implemented here.
-6. Verify continuous camera capture and F01's recorder startup dependency, then
-   measure four-camera throughput and real deletion timing. Automated local
-   tests are preparation for these acceptance tests, not a substitute for them.
+The previous S3 adapter remains available with `CLOUD_PROVIDER=s3`,
+`CLOUD_ENDPOINT_URL`, `CLOUD_BUCKET`, and normal SDK credentials. Install the
+`cloud` extra for it. Google Drive is the default; it does not use those S3
+settings. Changing providers on a populated queue requires migration.

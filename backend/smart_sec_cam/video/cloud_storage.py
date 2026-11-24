@@ -38,10 +38,12 @@ class CloudQueue:
     acquire a hold before using a cloud copy and release it after completion.
     Holds deliberately survive crashes until explicitly released.
     """
-    def __init__(self, conn, root, store, cleanup=False, local_cleanup=False):
+    def __init__(self, conn, root, store, cleanup=False, local_cleanup=False, formats=('mp4',)):
         self.conn, self.root, self.store = conn, root, store
         self.cleanup = cleanup
         self.local_cleanup = local_cleanup
+        self.formats = tuple(formats)
+        self.backend = getattr(store, 'identity', 'test')
         self.setup()
 
     def setup(self):
@@ -91,6 +93,14 @@ class CloudQueue:
                         last_error=NULL WHERE recording_id=? AND format=?''',
                         ((capture + CLOUD_RETENTION).isoformat(), capture.isoformat(), rid, fmt))
                 self.conn.execute('INSERT INTO cloud_policy VALUES (?)', (policy,))
+            self.conn.execute('CREATE TABLE IF NOT EXISTS cloud_backend (identity TEXT NOT NULL)')
+            binding = self.conn.execute('SELECT identity FROM cloud_backend').fetchone()
+            if binding and binding[0] != self.backend:
+                raise ValueError('Queue belongs to another cloud destination; migrate it before switching')
+            if not binding:
+                if self.conn.execute("SELECT 1 FROM cloud_uploads WHERE state='uploaded'").fetchone():
+                    raise ValueError('Existing uploaded queue needs an explicit provider migration')
+                self.conn.execute('INSERT INTO cloud_backend VALUES (?)', (self.backend,))
 
     def hold(self, recording_id, owner):
         if not owner:
@@ -112,6 +122,8 @@ class CloudQueue:
                 LEFT JOIN cloud_uploads u ON u.recording_id=v.recording_id AND u.format=v.format
                 WHERE u.recording_id IS NULL
             ''').fetchall():
+                if fmt not in self.formats:
+                    continue
                 captured = datetime.fromisoformat(end)
                 if captured.tzinfo is None:
                     raise ValueError('Capture time must include timezone')
@@ -123,15 +135,7 @@ class CloudQueue:
                      expires.isoformat(), now.isoformat()))
 
     def protected(self, rid):
-        if self.conn.execute('SELECT 1 FROM cloud_holds WHERE recording_id=?', (rid,)).fetchone():
-            return True
-        # Existing incident archives are separate files. Also conservatively
-        # protect an original if a legacy incident record references its name.
-        if self.conn.execute("SELECT 1 FROM sqlite_master WHERE name='incident_clips'").fetchone():
-            return self.conn.execute('''SELECT 1 FROM incident_clips i
-                JOIN recording_variants v ON v.filename=i.filename
-                WHERE v.recording_id=? AND i.incident_flag=1''', (rid,)).fetchone() is not None
-        return False
+        return recording_protected(self.conn, rid)
 
     def tick(self, now=None, limit=100):
         fixed_time = now
@@ -140,10 +144,12 @@ class CloudQueue:
             raise ValueError('Worker time must include timezone')
         now = now.astimezone(timezone.utc)
         self.discover(now)
+        placeholders = ','.join('?' for _ in self.formats)
         rows = self.conn.execute('''SELECT recording_id,format FROM cloud_uploads
             WHERE state IN ('pending','uploaded','expired') AND next_attempt<=?
+            AND format IN (''' + placeholders + ''')
             ORDER BY next_attempt, recording_id, format LIMIT ?''',
-            (now.isoformat(), limit)).fetchall()
+            (now.isoformat(), *self.formats, limit)).fetchall()
         for rid, fmt in rows:
             if fixed_time is None:
                 now = utc_now().astimezone(timezone.utc)
@@ -179,6 +185,14 @@ class CloudQueue:
                             if digest(local) != verified_sha:
                                 raise LocalCopyUnavailable('Local copy differs from verified upload')
                         path.unlink()
+                    # WebM is a local compatibility encoding. A verified MP4
+                    # cloud copy preserves the recording when its local pair expires.
+                    if fmt == 'mp4' and self.formats == ('mp4',):
+                        peer = self.conn.execute('''SELECT path FROM recording_variants
+                            WHERE recording_id=? AND format=?''', (rid, 'webm')).fetchone()
+                        peer_path = media_file(self.root, peer[0]) if peer else None
+                        if peer_path is not None:
+                            peer_path.unlink()
                     self.conn.execute('''UPDATE cloud_uploads SET local_deleted=1
                         WHERE recording_id=? AND format=?''', (rid, fmt))
                     local_deleted = True
@@ -234,6 +248,18 @@ class CloudQueue:
             WHERE recording_id=? AND format=?''', (state, rid, fmt))
 
 
+def recording_protected(conn, rid):
+    if conn.execute('SELECT 1 FROM cloud_holds WHERE recording_id=?', (rid,)).fetchone():
+        return True
+    # Existing incident archives are separate files. Also conservatively
+    # protect an original if a legacy incident record references its name.
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='incident_clips'").fetchone():
+        return conn.execute('''SELECT 1 FROM incident_clips i
+            JOIN recording_variants v ON v.filename=i.filename
+            WHERE v.recording_id=? AND i.incident_flag=1''', (rid,)).fetchone() is not None
+    return False
+
+
 class S3Store:
     """Private S3-compatible bucket adapter, including Cloudflare R2."""
     def __init__(self, client, bucket):
@@ -248,6 +274,14 @@ class S3Store:
         body = self.client.get_object(Bucket=self.bucket, Key=key)['Body']
         try:
             return digest(body)
+        finally:
+            body.close()
+
+    def download(self, key, target):
+        body = self.client.get_object(Bucket=self.bucket, Key=key)['Body']
+        try:
+            for chunk in iter(lambda: body.read(1024 * 1024), b''):
+                target.write(chunk)
         finally:
             body.close()
 

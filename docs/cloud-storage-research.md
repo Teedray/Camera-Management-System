@@ -43,23 +43,30 @@ variant. The cloud deadline does not depend on a retained local copy. Database
 migration repairs earlier one-hour cloud deadlines and requeues previously
 expired or deleted variants for recovery where their local files remain.
 
-Current API playback still reads local files, so deploy with local cleanup
-disabled until authorized cloud retrieval is integrated. Existing camera
+Cloud MP4 playback now uses authorized backend retrieval when the local file
+is absent. Deploy with local cleanup disabled until a real Drive playback test succeeds. Existing camera
 assignment checks must apply to every cloud playback/range request. Saved
 incident archives remain separate from routine footage.
 
-## Provider status
+## Confirmed provider and encoding
 
-Cloudflare R2 was proposed as an S3-compatible provider, not as an assignment
-requirement. No bucket has been confirmed in this session. Provider selection
-should be coordinated with Andre's F06 integration work. The adapter can use an
-existing private S3-compatible bucket with its endpoint and bucket-scoped keys.
+The team confirmed **Google Drive backed by the dedicated Google One account**,
+with **MP4-only cloud uploads**. The previous Cloudflare R2 proposal is superseded.
+The on-site recorder and application server still run locally. The worker now
+has a Drive API adapter using per-file OAuth, a private app-created folder, and
+persistent generated file IDs for duplicate-safe retries. The S3 adapter remains
+an optional compatibility path, with destination checks preventing accidental
+mixing of provider state.
 
-References for R2 setup: [S3 setup](https://developers.cloudflare.com/r2/get-started/s3/),
-[credentials](https://developers.cloudflare.com/r2/api/tokens/), and
-[pricing](https://developers.cloudflare.com/r2/pricing/). Recheck actual pricing
-and terms before activating a paid account; this document makes no zero-cost
-claim.
+Cloud-only playback is now implemented behind the existing camera assignments.
+Flask downloads and verifies a complete MP4 before serving full or ranged bytes.
+Incident saving can use the same verified cloud source. Both cleanup flags remain
+disabled until the team's real account/camera tests pass.
+
+The capacity figures above are planning estimates, not the three-clip Reolink
+measurements supplied in the discussion. Do not treat either sample as a
+four-camera busy-store measurement. Confirm the dedicated account's usable quota,
+actual bitrate, sustained upload capacity, and OAuth production readiness.
 
 ## Acceptance work still needed
 
@@ -68,7 +75,7 @@ claim.
 - Run real upload/read-back, a ten-minute outage, and recovery tests.
 - Demonstrate one-hour local cleanup only after verified upload, thirty-day cloud
   expiry, saved-incident protection, and active-job holds using timestamp fixtures.
-- Integrate authorized cloud review/playback before enabling local cleanup.
+- Validate the implemented authorized cloud review/playback before enabling local cleanup.
 - Validate separate incident backups and restoration of footage plus metadata.
 
 See [Lakeira's setup guide](lakeira-f02.md) for worker commands, test coverage,

@@ -1,5 +1,7 @@
 # Optional worker: use together with docker-compose.yml after configuring .env.cloud.
 services:
+  server:
+    env_file: .env.cloud
   cloud-worker:
     build:
       context: .

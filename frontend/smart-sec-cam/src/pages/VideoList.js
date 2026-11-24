@@ -1,7 +1,6 @@
 import React from "react";
 import { useNavigate } from 'react-router-dom';
 
-import { isIOS } from 'react-device-detect' 
 import { useCookies } from 'react-cookie';
 
 import VideoPlayer from "../components/VideoPlayer";
@@ -49,11 +48,8 @@ export default function VideoList(props) {
                 method: 'GET',
                 headers: { 'x-access-token': cookies.token },
             };
-            // Get room list
-            let videoFormat = "webm";
-            if (isIOS) {
-                videoFormat = "mp4"
-            }
+            // The cloud tier retains MP4 only on every browser.
+            const videoFormat = "mp4";
             const requestUrl = SERVER_URL + VIDEOS_ENDPOINT + "?video-format=" + videoFormat;
             fetch(requestUrl, requestOptions)
                 .then((resp) => resp.json())

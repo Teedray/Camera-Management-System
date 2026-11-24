@@ -53,7 +53,7 @@ class CloudTests(unittest.TestCase):
                 self.db.conn.execute('INSERT INTO recording_variants VALUES (?,?,?,?,?,?)',
                                      (self.rid, fmt, 'front.' + fmt, relative, 9, 30))
         self.store = MemoryStore()
-        self.queue = CloudQueue(self.db.conn, self.root, self.store)
+        self.queue = CloudQueue(self.db.conn, self.root, self.store, formats=('mp4','webm'))
 
     def states(self):
         return [row[0] for row in self.db.conn.execute('SELECT state FROM cloud_uploads')]
@@ -171,7 +171,7 @@ class CloudTests(unittest.TestCase):
         self.queue.tick(self.now)
         self.store.offline = False
         with sqlite3.connect(self.root / 'test.db') as conn:
-            restarted = CloudQueue(conn, self.root, self.store)
+            restarted = CloudQueue(conn, self.root, self.store, formats=('mp4','webm'))
             restarted.tick(self.now + timedelta(seconds=1))
             self.assertFalse(self.store.objects)
             restarted.tick(self.now + timedelta(seconds=6))
@@ -222,7 +222,7 @@ class CloudTests(unittest.TestCase):
             self.db.conn.execute("UPDATE cloud_uploads SET expires_at=?,state='deleted'",
                                  ((self.now + timedelta(hours=1)).isoformat(),))
         self.store.objects.clear()
-        restarted = CloudQueue(self.db.conn, self.root, self.store)
+        restarted = CloudQueue(self.db.conn, self.root, self.store, formats=('mp4','webm'))
         self.assertEqual(self.states(), ['pending', 'pending'])
         restarted.tick(self.now + timedelta(hours=2))
         self.assertEqual(self.states(), ['uploaded', 'uploaded'])
