@@ -127,7 +127,7 @@ export default function VideoList(props) {
                     </React.Fragment>
                 </div>
                 <div className="videoPlayer">
-                    <VideoPlayer videoFileName={selectedVideoFile} token={cookies.token} />
+                    <VideoPlayer key={selectedVideoFile} videoFileName={selectedVideoFile} token={cookies.token} />
                 </div>
             </div>
         </div>
