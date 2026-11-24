@@ -34,11 +34,13 @@ streamer = [
 detector = [
     "opencv-python-headless >= 4.5.5",
     "numpy >= 1.22.0",
-    "imutils >= 0.5.4"
+    "imutils >= 0.5.4",
+    "imageio-ffmpeg >= 0.5"
 ]
 recorder = [
     "opencv-python-headless >= 4.5.5",
-    "numpy >= 1.22.0"
+    "numpy >= 1.22.0",
+    "imageio-ffmpeg >= 0.5"
 ]
 server = [
     "flask ~= 2.3.3",
@@ -46,5 +48,6 @@ server = [
     "flask-socketio == 5.7.2",
     "eventlet ~= 0.40.0",
     "opencv-python-headless >= 4.5.5",
-    "pyjwt >= 2.4.0"
+    "pyjwt >= 2.4.0",
+    "imageio-ffmpeg >= 0.5"
 ]

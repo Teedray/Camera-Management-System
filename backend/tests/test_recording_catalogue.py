@@ -89,13 +89,10 @@ class RecordingCatalogueTest(AdminApiTestCase):
     def test_failed_encoder_never_publishes_partial_pair(self):
         writer = VideoWriter("front-stream", self.root)
         writer.add_frame(np.zeros((48, 64, 3), dtype=np.uint8))
-        real_writer = cv2.VideoWriter
-
-        def fail_mp4(path, *args):
-            return real_writer() if path.endswith(".mp4") else real_writer(path, *args)
-
+        # An unopened writer: the MP4 encoder fails after the WebM succeeded.
         with patch.object(writer, "_calculate_fps", return_value=1):
-            with patch("smart_sec_cam.video.writer.cv2.VideoWriter", side_effect=fail_mp4):
+            with patch("smart_sec_cam.video.writer.open_mp4_writer",
+                       side_effect=lambda *args: cv2.VideoWriter()):
                 with self.assertRaises(RuntimeError):
                     writer.write()
         self.assertEqual(self.client.get("/api/video/video-list",

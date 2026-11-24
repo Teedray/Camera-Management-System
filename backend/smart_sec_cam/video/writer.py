@@ -10,6 +10,7 @@ import cv2
 
 
 from smart_sec_cam.video.catalogue import MEDIA_DIR, QUEUE_DIR
+from smart_sec_cam.video.h264 import open_mp4_writer
 
 
 class VideoWriter:
@@ -50,9 +51,13 @@ class VideoWriter:
         directory = root / MEDIA_DIR / recording_id
         directory.mkdir(parents=True)
         durations = {}
-        for fmt, codec in (("webm", "VP90"), ("mp4", "mp4v")):
+        for fmt in ("webm", "mp4"):
             path = str(directory / ("clip." + fmt))
-            writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*codec), fps, self.resolution)
+            if fmt == "mp4":
+                # H.264, so the MP4 (the copy kept in the cloud) plays in every browser.
+                writer = open_mp4_writer(path, fps, self.resolution)
+            else:
+                writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"VP90"), fps, self.resolution)
             try:
                 if not writer.isOpened():
                     raise RuntimeError(f"Cannot encode {fmt} recording")

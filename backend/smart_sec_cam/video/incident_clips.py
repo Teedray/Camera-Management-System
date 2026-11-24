@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from smart_sec_cam.video.h264 import open_mp4_writer
 from smart_sec_cam.video.incident_database import IncidentDatabase
 
 class IncidentClipManager:
@@ -170,12 +171,8 @@ class IncidentClipManager:
         )
 
         # Prepare the output video
-        writer = cv2.VideoWriter(
-            str(output_path),
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            fps,
-            (width, height)
-        )
+        # H.264 so the saved clip plays in every browser
+        writer = open_mp4_writer(str(output_path), fps, (width, height))
 
         if not writer.isOpened():
             video.release()
@@ -197,10 +194,10 @@ class IncidentClipManager:
                 frames_written += 1
         finally:
             video.release()
-            writer.release()
+            encoded = writer.release() is not False
 
         # Verify the extracted footage
-        if frames_written != end_frame - start_frame:
+        if not encoded or frames_written != end_frame - start_frame:
             output_path.unlink(missing_ok=True)
             print("Failed to extract the complete incident clip")
             return None
