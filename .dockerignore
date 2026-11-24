@@ -1,1 +1,4 @@
 data
+# Local cloud credentials and Python environments
+.env.cloud
+.venv/

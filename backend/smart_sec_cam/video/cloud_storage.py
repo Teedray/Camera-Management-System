@@ -8,6 +8,10 @@ from smart_sec_cam.video.catalogue import media_file
 logger = logging.getLogger(__name__)
 
 
+class LocalCopyUnavailable(ValueError):
+    """Cloud deletion is blocked until the retained local copy is available."""
+
+
 def utc_now():
     return datetime.now(timezone.utc)
 
@@ -48,6 +52,8 @@ class CloudQueue:
                 FOREIGN KEY(recording_id, format)
                     REFERENCES recording_variants(recording_id, format)
             );
+            CREATE INDEX IF NOT EXISTS idx_cloud_uploads_due
+                ON cloud_uploads(state, next_attempt);
             CREATE TABLE IF NOT EXISTS cloud_holds (
                 recording_id TEXT NOT NULL REFERENCES recordings(id),
                 owner TEXT NOT NULL,
@@ -72,6 +78,8 @@ class CloudQueue:
             for rid, fmt, end in self.conn.execute('''
                 SELECT v.recording_id, v.format, r.capture_end_utc
                 FROM recording_variants v JOIN recordings r ON r.id=v.recording_id
+                LEFT JOIN cloud_uploads u ON u.recording_id=v.recording_id AND u.format=v.format
+                WHERE u.recording_id IS NULL
             ''').fetchall():
                 captured = datetime.fromisoformat(end)
                 if captured.tzinfo is None:
@@ -95,6 +103,7 @@ class CloudQueue:
         return False
 
     def tick(self, now=None, limit=100):
+        fixed_time = now
         now = now or utc_now()
         if now.tzinfo is None:
             raise ValueError('Worker time must include timezone')
@@ -105,27 +114,37 @@ class CloudQueue:
             ORDER BY next_attempt, recording_id, format LIMIT ?''',
             (now.isoformat(), limit)).fetchall()
         for rid, fmt in rows:
+            if fixed_time is None:
+                now = utc_now().astimezone(timezone.utc)
             attempts = 0
+            expired = False
+            expiry = (now + timedelta(hours=1)).isoformat()
             try:
                 # Serialize workers and hold acquisition with the expiry check.
                 # Network calls are bounded by the S3 adapter's timeouts.
                 self.conn.execute('BEGIN IMMEDIATE')
                 row = self.conn.execute('''SELECT u.object_key,u.expires_at,u.state,
-                    u.attempts,v.path,v.size_bytes FROM cloud_uploads u
+                    u.attempts,v.path,v.size_bytes,u.sha256 FROM cloud_uploads u
                     JOIN recording_variants v USING(recording_id,format)
                     WHERE u.recording_id=? AND u.format=? AND u.next_attempt<=?''',
                     (rid, fmt, now.isoformat())).fetchone()
                 if not row or row[2] not in ('pending', 'uploaded', 'expired'):
                     self.conn.rollback()
                     continue
-                key, expiry, state, attempts, relative, size = row
+                key, expiry, state, attempts, relative, size, verified_sha = row
                 expired = datetime.fromisoformat(expiry) <= now
                 protected = self.protected(rid)
                 path = media_file(self.root, relative)
                 if expired and not protected:
                     # Delete deterministic keys even for pending rows: a worker
                     # may have crashed after PUT but before its SQLite commit.
-                    if self.cleanup and path is not None and path.stat().st_size == size:
+                    if self.cleanup:
+                        if path is None or path.stat().st_size != size:
+                            raise LocalCopyUnavailable('Retained local copy is missing or changed')
+                        if verified_sha:
+                            with path.open('rb') as local:
+                                if digest(local) != verified_sha:
+                                    raise LocalCopyUnavailable('Retained local checksum differs')
                         self.store.delete(key)
                         self._state(rid, fmt, 'deleted')
                     elif state == 'pending':
@@ -153,10 +172,16 @@ class CloudQueue:
                 self.conn.rollback()
                 # Keep details out of persisted errors: SDK exceptions can contain
                 # endpoints and credentials. Full operational investigation is separate.
+                # Expired deletes retry every minute. Upload retries must not
+                # defer the first expiry check beyond the capture-based deadline.
+                delay = min(60 if expired else 3600, 5 * 2 ** min(attempts, 10))
+                retry_at = now + timedelta(seconds=delay)
+                if not expired:
+                    retry_at = min(retry_at, datetime.fromisoformat(expiry))
                 with self.conn:
                     self.conn.execute('''UPDATE cloud_uploads SET attempts=attempts+1,
                         next_attempt=?,last_error=? WHERE recording_id=? AND format=?''',
-                        ((now + timedelta(seconds=min(3600, 5 * 2 ** min(attempts, 10)))).isoformat(),
+                        (retry_at.isoformat(),
                          type(exc).__name__, rid, fmt))
                 logger.warning('Cloud operation pending for %s/%s: %s', rid, fmt, type(exc).__name__)
 
@@ -172,7 +197,8 @@ class S3Store:
 
     def upload(self, key, source, size, fmt):
         self.client.put_object(Bucket=self.bucket, Key=key, Body=source,
-                               ContentLength=size, ContentType='video/' + fmt)
+                               ContentLength=size, ContentType=('video/' + fmt if fmt in ('mp4', 'webm')
+                                                               else 'application/octet-stream'))
 
     def sha256(self, key):
         body = self.client.get_object(Bucket=self.bucket, Key=key)['Body']
@@ -183,3 +209,31 @@ class S3Store:
 
     def delete(self, key):
         self.client.delete_object(Bucket=self.bucket, Key=key)
+
+
+def queue_status(conn, now=None):
+    """Read-only operational summary; safe before the worker has initialized."""
+    now = now or utc_now()
+    if now.tzinfo is None:
+        raise ValueError('Status time must include timezone')
+    now = now.astimezone(timezone.utc).isoformat()
+    states = dict.fromkeys(('pending', 'uploaded', 'expired', 'deleted'), 0)
+    ready = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cloud_uploads'"
+    ).fetchone() is not None
+    result = {'queue_ready': ready, 'states': states, 'failed': 0,
+              'due': 0, 'overdue': 0, 'holds': 0, 'verified_recent': 0}
+    if not ready:
+        return result
+    states.update(dict(conn.execute('SELECT state,COUNT(*) FROM cloud_uploads GROUP BY state')))
+    for field, condition, params in (
+        ('failed', 'last_error IS NOT NULL', ()),
+        ('due', "state!='deleted' AND next_attempt<=?", (now,)),
+        ('overdue', "state!='deleted' AND expires_at<=?", (now,)),
+        ('verified_recent', "state='uploaded' AND expires_at>?", (now,)),
+    ):
+        result[field] = conn.execute(
+            'SELECT COUNT(*) FROM cloud_uploads WHERE ' + condition, params
+        ).fetchone()[0]
+    result['holds'] = conn.execute('SELECT COUNT(*) FROM cloud_holds').fetchone()[0]
+    return result

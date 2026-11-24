@@ -140,5 +140,75 @@ class CloudTests(unittest.TestCase):
         self.assertEqual(self.states(), ['deleted', 'deleted'])
 
 
+class CloudFollowupTests(unittest.TestCase):
+    setUp = CloudTests.setUp
+    states = CloudTests.states
+
+    def test_live_clock_is_rechecked_between_operations(self):
+        from unittest.mock import patch
+        # Selection starts before expiry, but processing reaches the deadline.
+        with patch('smart_sec_cam.video.cloud_storage.utc_now',
+                   side_effect=[self.now + timedelta(minutes=59),
+                                self.now + timedelta(hours=1),
+                                self.now + timedelta(hours=1)]):
+            self.queue.tick()
+        self.assertFalse(self.store.objects)
+        self.assertEqual(self.states(), ['expired', 'expired'])
+
+    def test_retry_never_schedules_past_capture_expiry(self):
+        self.store.offline = True
+        self.queue.discover(self.now)
+        with self.db.conn:
+            self.db.conn.execute('UPDATE cloud_uploads SET attempts=20')
+        self.queue.tick(self.now + timedelta(minutes=59))
+        deadlines = self.db.conn.execute('SELECT next_attempt FROM cloud_uploads').fetchall()
+        self.assertEqual({r[0] for r in deadlines}, {(self.now + timedelta(hours=1)).isoformat()})
+
+    def test_expired_retry_delay_is_at_most_one_minute(self):
+        self.queue.tick(self.now)
+        self.queue.cleanup = True
+        self.store.offline = True
+        with self.db.conn:
+            self.db.conn.execute('UPDATE cloud_uploads SET attempts=20')
+        current = self.now + timedelta(hours=2)
+        self.queue.tick(current)
+        deadlines = self.db.conn.execute('SELECT next_attempt FROM cloud_uploads').fetchall()
+        self.assertEqual({r[0] for r in deadlines}, {(current + timedelta(minutes=1)).isoformat()})
+
+    def test_same_size_local_corruption_blocks_cloud_deletion(self):
+        self.queue.tick(self.now)
+        (self.root / 'catalogue' / self.rid / 'clip.mp4').write_bytes(b'corrupted')
+        self.queue.cleanup = True
+        self.queue.tick(self.now + timedelta(hours=2))
+        self.assertEqual(list(self.store.objects), ['routine/' + self.rid + '/clip.mp4'])
+        error, = self.db.conn.execute("SELECT last_error FROM cloud_uploads WHERE format='mp4'").fetchone()
+        self.assertEqual(error, 'LocalCopyUnavailable')
+
+    def test_status_counts_failures_holds_and_verified_recent(self):
+        from smart_sec_cam.video.cloud_storage import queue_status
+        self.store.offline = True
+        self.queue.tick(self.now)
+        self.queue.hold(self.rid, 'export:1')
+        status = queue_status(self.db.conn, self.now)
+        self.assertEqual((status['failed'], status['holds'], status['verified_recent']), (2, 1, 0))
+        self.store.offline = False
+        self.queue.tick(self.now + timedelta(seconds=6))
+        status = queue_status(self.db.conn, self.now + timedelta(seconds=6))
+        self.assertEqual((status['failed'], status['verified_recent']), (0, 2))
+        self.assertEqual(queue_status(self.db.conn, self.now + timedelta(hours=2))['overdue'], 2)
+
+    def test_queue_survives_real_database_reconnection(self):
+        self.store.offline = True
+        self.queue.tick(self.now)
+        # A fresh connection reads the persisted retry deadlines and failure state.
+        with sqlite3.connect(self.root / 'test.db') as conn:
+            restarted = CloudQueue(conn, self.root, self.store)
+            self.store.offline = False
+            restarted.tick(self.now + timedelta(seconds=1))
+            self.assertFalse(self.store.objects)
+            restarted.tick(self.now + timedelta(seconds=6))
+        self.assertEqual(self.states(), ['uploaded', 'uploaded'])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -1,46 +1,129 @@
-"""Run with python -m smart_sec_cam.video.cloud_worker --once."""
+"""Run with python -m smart_sec_cam.video.cloud_worker --help."""
 import argparse
+import io
+import json
 import logging
 import os
+import sqlite3
 import time
+from pathlib import Path
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from smart_sec_cam.auth.database import AuthDatabase
 from smart_sec_cam.video.catalogue import import_completed
-from smart_sec_cam.video.cloud_storage import CloudQueue, S3Store
+from smart_sec_cam.video.cloud_storage import CloudQueue, S3Store, digest, queue_status
+
+logger = logging.getLogger(__name__)
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Sync completed footage to private cloud storage')
-    parser.add_argument('--once', action='store_true')
-    parser.add_argument('--enable-cleanup', action='store_true',
-                        help='Delete expired routine cloud objects; keeps local and incident files')
-    args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO)
-    endpoint = os.environ['CLOUD_ENDPOINT_URL']
-    if urlparse(endpoint).scheme != 'https':
-        parser.error('CLOUD_ENDPOINT_URL must use HTTPS')
-    # Optional dependency: ordinary local recording still works without boto3.
+def configured_store(environ):
+    """Validate settings before importing the optional SDK or touching the database."""
+    endpoint = environ.get('CLOUD_ENDPOINT_URL', '')
+    url = urlparse(endpoint)
+    if (url.scheme != 'https' or not url.hostname or url.username or url.password
+            or url.query or url.fragment or url.path not in ('', '/')):
+        raise ValueError('Set CLOUD_ENDPOINT_URL to an HTTPS endpoint without credentials or a path')
+    bucket = environ.get('CLOUD_BUCKET', '').strip()
+    if not bucket:
+        raise ValueError('Set CLOUD_BUCKET to the existing private bucket name')
     import boto3
     from botocore.config import Config
     client = boto3.client('s3', endpoint_url=endpoint,
-                          region_name=os.getenv('AWS_DEFAULT_REGION', 'auto'),
+                          region_name=environ.get('AWS_DEFAULT_REGION', 'auto'),
                           config=Config(connect_timeout=5, read_timeout=30,
                                         retries={'max_attempts': 2}))
-    db = AuthDatabase()
-    root = os.getenv('VIDEO_DIR', 'data/videos')
-    queue = CloudQueue(db.conn, root, S3Store(client, os.environ['CLOUD_BUCKET']),
-                       cleanup=args.enable_cleanup)
+    return S3Store(client, bucket)
+
+
+def check_connection(store):
+    """Test PUT/GET/DELETE on one random, non-footage object.
+
+    This checks credentials and byte integrity, not bucket public-access settings.
+    Always try deletion, even if PUT's response is lost or verification fails.
+    """
+    key = 'health-check/{}.txt'.format(uuid4().hex)
+    sample = b'camera-management-system cloud connection check\n'
     try:
+        store.upload(key, io.BytesIO(sample), len(sample), 'plain')
+        if store.sha256(key) != digest(io.BytesIO(sample)):
+            raise ValueError('Cloud read-back checksum mismatch')
+    finally:
+        try:
+            store.delete(key)
+        except Exception:
+            # A temporary object may remain. Its random key is safe to report.
+            logger.error('Could not remove connection-check object: %s', key)
+            raise
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='Sync completed footage to private cloud storage')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--once', action='store_true')
+    mode.add_argument('--check', action='store_true',
+                      help='Upload, verify and delete a small connection-check object')
+    mode.add_argument('--status', action='store_true',
+                      help='Print local queue JSON without credentials or cloud access')
+    parser.add_argument('--database', default='data/smart-sec-cam.db',
+                        help='Shared application SQLite database path')
+    parser.add_argument('--enable-cleanup', action='store_true',
+                        help='Delete expired routine cloud objects; keeps local and incident files')
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO)
+    if args.status:
+        path = Path(args.database).resolve()
+        if not path.is_file():
+            parser.error('Shared database does not exist; start the application first')
+        with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True) as conn:
+            print(json.dumps(queue_status(conn), sort_keys=True))
+        return 0
+    try:
+        store = configured_store(os.environ)
+        if args.check:
+            check_connection(store)
+            print('Cloud connection check passed: upload, SHA-256 read-back and delete accepted')
+            return 0
+    except ImportError:
+        parser.error("Install the cloud dependency first: python -m pip install '.[cloud]'")
+    except ValueError as exc:
+        parser.error(str(exc))
+    except Exception as exc:
+        logger.error('Cloud connection check failed: %s', type(exc).__name__)
+        return 1
+
+    path = Path(args.database).resolve()
+    if not path.is_file():
+        parser.error('Shared database does not exist; start the application first')
+    # Do not construct AuthDatabase here: the worker should not create an empty
+    # application database when started from the wrong directory.
+    conn = sqlite3.connect(str(path), timeout=30)
+    conn.execute('PRAGMA foreign_keys=ON')
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if not {'recordings', 'recording_variants', 'cameras'}.issubset(tables):
+        conn.close()
+        parser.error('Database lacks the shared recording catalogue; start the application first')
+    db = AuthDatabase.__new__(AuthDatabase)
+    db.conn = conn
+    root = os.getenv('VIDEO_DIR', 'data/videos')
+    try:
+        queue = CloudQueue(conn, root, store, cleanup=args.enable_cleanup)
         while True:
-            import_completed(db, root)
-            queue.tick()
-            if args.once:
-                break
+            try:
+                import_completed(db, root)
+                queue.tick()
+                status = queue_status(conn)
+                logger.info('Cloud queue: %s', json.dumps(status, sort_keys=True))
+                if args.once:
+                    return 1 if status['failed'] else 0
+            except sqlite3.OperationalError as exc:
+                logger.warning('Cloud pass deferred: %s', type(exc).__name__)
+                if args.once:
+                    return 1
             time.sleep(60)
     finally:
-        db.conn.close()
+        conn.close()
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())
