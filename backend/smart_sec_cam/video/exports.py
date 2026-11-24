@@ -2,6 +2,8 @@ from math import isfinite
 
 import cv2
 
+from smart_sec_cam.video.h264 import open_mp4_writer
+
 
 class InvalidClipRange(ValueError):
     pass
@@ -27,9 +29,8 @@ def export_clip(source, destination, start, end):
         if first_frame and not video.set(cv2.CAP_PROP_POS_FRAMES, first_frame):
             raise OSError("Could not seek to the selected frame")
 
-        writer = cv2.VideoWriter(
-            str(destination), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height)
-        )
+        # H.264 so the downloaded clip plays in browsers and common players.
+        writer = open_mp4_writer(str(destination), fps, (width, height))
         try:
             if not writer.isOpened():
                 raise OSError("MP4 encoder could not be opened")
@@ -39,7 +40,9 @@ def export_clip(source, destination, start, end):
                     raise OSError("Recording ended before the selected end time")
                 writer.write(frame)
         finally:
-            writer.release()
+            encoded = writer.release() is not False
+        if not encoded:
+            raise OSError("MP4 encoder failed")
     finally:
         video.release()
 

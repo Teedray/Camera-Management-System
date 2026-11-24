@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 
 from smart_sec_cam.video.catalogue import MEDIA_DIR
+from smart_sec_cam.video.exports import InvalidClipRange, export_clip
 from smart_sec_cam.video.h264 import H264Writer, ffmpeg_executable, open_mp4_writer
 from smart_sec_cam.video.writer import VideoWriter
 
@@ -63,6 +64,21 @@ class TestH264Writer(unittest.TestCase):
             writer.write(frame)
         self.assertTrue(writer.release())
         self.assertIn(fourcc_of(path), ("avc1", "h264"))
+
+    def test_exported_clip_is_h264_and_exact(self):
+        source = self.dir / "source.mp4"
+        writer = open_mp4_writer(str(source), 10, (640, 480))
+        for frame in frames(50):
+            writer.write(frame)
+        self.assertTrue(writer.release())
+        clip = self.dir / "export.mp4"
+        export_clip(source, clip, 1.0, 3.0)
+        self.assertIn(fourcc_of(clip), ("avc1", "h264"))
+        capture = cv2.VideoCapture(str(clip))
+        self.assertEqual(int(capture.get(cv2.CAP_PROP_FRAME_COUNT)), 20)
+        capture.release()
+        with self.assertRaises(InvalidClipRange):
+            export_clip(source, self.dir / "bad.mp4", 3.0, 1.0)
 
     def test_failed_encoder_reports_failure(self):
         writer = H264Writer(str(self.dir / "missing-dir" / "x.mp4"), 10, (64, 48),
