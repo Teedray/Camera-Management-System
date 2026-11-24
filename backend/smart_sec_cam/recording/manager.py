@@ -24,7 +24,10 @@ from smart_sec_cam.video.writer import VideoWriter
 
 logger = logging.getLogger(__name__)
 
-CHANNEL_REFRESH_SECONDS = 10
+# How often to look for newly streaming cameras. A new camera's footage before
+# its channel is discovered is not recorded, so keep this short; the check is
+# one Redis KEYS call over a handful of keys.
+CHANNEL_REFRESH_SECONDS = 1
 IDLE_SLEEP_SECONDS = 0.01
 _STOP = object()
 
@@ -127,8 +130,10 @@ class CameraRecorder:
 class RecordingManager:
     def __init__(self, receiver, video_dir: str, segment_seconds: int = SEGMENT_SECONDS,
                  stall_seconds: float = STALL_SECONDS, clock: Callable[[], datetime] = utc_now,
-                 recorder_factory: Callable[..., CameraRecorder] = CameraRecorder):
+                 recorder_factory: Callable[..., CameraRecorder] = CameraRecorder,
+                 channel_refresh_seconds: float = CHANNEL_REFRESH_SECONDS):
         self.receiver = receiver
+        self.channel_refresh_seconds = channel_refresh_seconds
         self.video_dir = video_dir
         self.segment_seconds = segment_seconds
         self.stall_seconds = stall_seconds
@@ -161,8 +166,10 @@ class RecordingManager:
         return True
 
     def refresh_channels(self):
-        channels = list(self.receiver.get_all_channels())
-        if channels != list(self.receiver.subscribed_channels):
+        channels = sorted(self.receiver.get_all_channels())
+        # Compare as sets: Redis returns keys in no fixed order, and every
+        # resubscription briefly drops messages.
+        if set(channels) != set(self.receiver.subscribed_channels):
             self.receiver.set_channels(channels)
         for channel in list(self.recorders):
             if channel not in channels:
@@ -174,10 +181,10 @@ class RecordingManager:
             recorder.stop(timeout=60)
         self.recorders.clear()
 
-    def run_forever(self):
-        last_refresh = 0.0
-        while True:
-            if time.monotonic() - last_refresh > CHANNEL_REFRESH_SECONDS:
+    def run_forever(self, stop_event: threading.Event = None):
+        last_refresh = None
+        while stop_event is None or not stop_event.is_set():
+            if last_refresh is None or time.monotonic() - last_refresh >= self.channel_refresh_seconds:
                 try:
                     self.refresh_channels()
                 except Exception:

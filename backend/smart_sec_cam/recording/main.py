@@ -1,15 +1,17 @@
 """Continuous recording service: records every camera channel in 30-second segments."""
 import logging
 
-from smart_sec_cam.recording.manager import RecordingManager
+from smart_sec_cam.recording.manager import CHANNEL_REFRESH_SECONDS, RecordingManager
 from smart_sec_cam.recording.segmenter import SEGMENT_SECONDS, STALL_SECONDS
 from smart_sec_cam.redis import RedisImageReceiver
 
 
-def main(redis_url: str, redis_port: int, video_dir: str, segment_seconds: int, stall_seconds: float):
+def main(redis_url: str, redis_port: int, video_dir: str, segment_seconds: int, stall_seconds: float,
+         channel_refresh_seconds: float = CHANNEL_REFRESH_SECONDS):
     receiver = RedisImageReceiver(redis_url, redis_port)
     manager = RecordingManager(receiver, video_dir, segment_seconds=segment_seconds,
-                               stall_seconds=stall_seconds)
+                               stall_seconds=stall_seconds,
+                               channel_refresh_seconds=channel_refresh_seconds)
     try:
         manager.run_forever()
     finally:
@@ -28,7 +30,10 @@ if __name__ == '__main__':
                         default=SEGMENT_SECONDS)
     parser.add_argument('--stall-seconds', help='Seconds without frames before a camera counts as disconnected',
                         type=float, default=STALL_SECONDS)
+    parser.add_argument('--channel-refresh-seconds', help='How often to look for newly streaming cameras',
+                        type=float, default=CHANNEL_REFRESH_SECONDS)
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    main(args.redis_url, args.redis_port, args.video_dir, args.segment_seconds, args.stall_seconds)
+    main(args.redis_url, args.redis_port, args.video_dir, args.segment_seconds, args.stall_seconds,
+         args.channel_refresh_seconds)

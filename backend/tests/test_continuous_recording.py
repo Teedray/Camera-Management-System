@@ -1,5 +1,7 @@
 """F01 continuous recording: 30-second segments, cataloguing, gaps, isolation and camera status."""
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from functools import partial
@@ -177,6 +179,44 @@ class RecorderCatalogueTest(unittest.TestCase):
             recorder.submit(b"frame", moment)
         recorder.stop(timeout=30)
         self.assertEqual(recorder.segments_written, 2)
+
+    def test_new_camera_is_discovered_within_about_a_second(self):
+        class Receiver:
+            def __init__(self):
+                self.keys, self.subscribed_channels, self.subscriptions = ["Cam1"], [], []
+
+            def get_all_channels(self):
+                return list(self.keys)
+
+            def set_channels(self, channels):
+                self.subscribed_channels = list(channels)
+                self.subscriptions.append((time.monotonic(), list(channels)))
+
+            def get_new_message(self):
+                return None
+
+        receiver = Receiver()
+        manager = RecordingManager(receiver, str(self.root / "videos"),
+                                   recorder_factory=partial(CameraRecorder, writer=self.writer))
+        stop = threading.Event()
+        thread = threading.Thread(target=manager.run_forever, args=(stop,), daemon=True)
+        thread.start()
+        time.sleep(0.3)
+        receiver.keys = ["Cam2", "Cam1"]  # a camera starts streaming
+        appeared = time.monotonic()
+        deadline = appeared + 3
+        while time.monotonic() < deadline and "Cam2" not in receiver.subscribed_channels:
+            time.sleep(0.02)
+        latency = time.monotonic() - appeared
+        receiver.keys = ["Cam1", "Cam2"]  # same channels, different order
+        time.sleep(1.3)
+        stop.set()
+        thread.join(5)
+        manager.stop()
+        self.assertIn("Cam2", receiver.subscribed_channels)
+        self.assertLess(latency, 1.2)
+        # Subscribed once at start, once for Cam2; a reordered key list is not a change.
+        self.assertEqual([channels for _, channels in receiver.subscriptions], [["Cam1"], ["Cam1", "Cam2"]])
 
     def test_dead_recorder_is_restarted(self):
         class Receiver:
