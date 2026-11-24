@@ -7,13 +7,15 @@ from datetime import datetime
 from functools import wraps
 from numbers import Real
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import eventlet
 eventlet.monkey_patch()
 
 import jwt.exceptions
+from eventlet import tpool
 from flask import (
-    Flask, send_from_directory, render_template,
+    Flask, send_file, send_from_directory, render_template,
     request, g, jsonify
 )
 from flask_cors import CORS
@@ -24,6 +26,7 @@ from smart_sec_cam.auth.database import AuthDatabase, LastAdministratorError
 from smart_sec_cam.auth.models import User
 from smart_sec_cam.redis import RedisImageReceiver
 from smart_sec_cam.video.catalogue import assigned_variants, import_completed, media_file
+from smart_sec_cam.video.exports import InvalidClipRange, export_clip
 from smart_sec_cam.video.incident_clips import IncidentClipManager
 from smart_sec_cam.video.incident_database import IncidentDatabase
 
@@ -599,6 +602,50 @@ def update_camera_assignment(user_id, camera_id):
     return jsonify(
         success=True, data={"user_id": user_id, "camera_id": camera_id}
     ), 200
+
+
+@app.route("/api/v1/exports", methods=["POST"])
+@require_token
+def download_export():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify(error="Expected a JSON object"), 400
+
+    filename = payload.get("filename")
+    if (
+        not isinstance(filename, str) or not filename
+        or any(character in filename for character in ("/", "\\", "\x00"))
+        or Path(filename).suffix not in (".mp4", ".webm")
+    ):
+        return jsonify(error="Select a valid recording"), 400
+
+    start, end = payload.get("start_time"), payload.get("end_time")
+    if any(isinstance(value, bool) or not isinstance(value, Real) for value in (start, end)):
+        return jsonify(error="Enter start and end times in seconds"), 400
+    if not 0 <= start < end < float("inf"):
+        return jsonify(error="The end time must be greater than the start time"), 400
+
+    source = resolve_recording(g.current_user.user_id, filename)
+    if source is None:
+        return jsonify(error="Recording unavailable"), 404
+
+    workspace = TemporaryDirectory(prefix="camera-export-")
+    output = Path(workspace.name) / "clip.mp4"
+    try:
+        tpool.execute(export_clip, source, output, start, end)
+        response = send_file(output, mimetype="video/mp4", as_attachment=True, conditional=False)
+    except InvalidClipRange as error:
+        workspace.cleanup()
+        return jsonify(error=str(error)), 400
+    except Exception:
+        workspace.cleanup()
+        app.logger.exception("Recording export failed")
+        return jsonify(error="Could not export the selected clip"), 500
+
+    response.headers["Cache-Control"] = "no-store"
+    response.direct_passthrough = False
+    response.call_on_close(workspace.cleanup)
+    return response
 
 
 @app.route("/api/v1/incidents", methods=["POST"])
