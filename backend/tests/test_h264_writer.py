@@ -1,4 +1,5 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -6,7 +7,7 @@ import cv2
 import numpy as np
 
 from smart_sec_cam.video.catalogue import MEDIA_DIR
-from smart_sec_cam.video.h264 import H264Writer, ffmpeg_executable, open_mp4_writer
+from smart_sec_cam.video.h264 import H264Writer, ffmpeg_executable, open_mp4_writer, open_webm_writer
 from smart_sec_cam.video.writer import VideoWriter
 
 
@@ -46,6 +47,28 @@ class TestH264Writer(unittest.TestCase):
         self.assertEqual(int(capture.get(cv2.CAP_PROP_FRAME_COUNT)), 30)
         self.assertTrue(capture.read()[0])
         capture.release()
+
+    def test_recording_webm_is_vp9_and_plays(self):
+        writer = VideoWriter("Cam1", path=str(self.dir))
+        for frame in frames(30):
+            writer.add_frame(frame)
+        recording_id = writer.write(fps=10)
+        webm = self.dir / MEDIA_DIR / recording_id / "clip.webm"
+        self.assertEqual(webm.read_bytes()[:4], bytes.fromhex("1a45dfa3"))
+        self.assertEqual(fourcc_of(webm), "vp90")
+        capture = cv2.VideoCapture(str(webm))
+        self.assertTrue(capture.read()[0])
+        capture.release()
+
+    def test_segment_encodes_faster_than_real_time(self):
+        # 30 s at 10 fps must encode in well under 30 s or the recorder falls behind.
+        started = time.monotonic()
+        for name, opener in (("a.mp4", open_mp4_writer), ("a.webm", open_webm_writer)):
+            writer = opener(str(self.dir / name), 10, (640, 480))
+            for frame in frames(300):
+                writer.write(frame)
+            self.assertTrue(writer.release())
+        self.assertLess(time.monotonic() - started, 20)
 
     def test_index_is_at_the_start_for_streaming(self):
         path = self.dir / "clip.mp4"
