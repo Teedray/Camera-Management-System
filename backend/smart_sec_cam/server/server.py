@@ -3,6 +3,8 @@ import ipaddress
 import json
 import os
 import sqlite3
+import tempfile
+import shutil
 import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -33,6 +35,10 @@ from smart_sec_cam.video.catalogue import (
 from smart_sec_cam.video.exports import InvalidClipRange, export_clip
 from smart_sec_cam.video.incident_clips import IncidentClipManager
 from smart_sec_cam.video.incident_database import IncidentDatabase
+from smart_sec_cam.video.cloud_playback import (
+    cloud_entry, fetch_cloud_recording, acquire_local_job_hold, release_job_hold
+)
+from smart_sec_cam.video.cloud_worker import configured_store
 
 # SocketIO & CORS
 app = Flask(__name__, static_url_path='', static_folder='/backend/build', template_folder='/backend/build')
@@ -453,7 +459,7 @@ def get_video_list():
     recordings = [
         (datetime.fromisoformat(start).timestamp(), filename)
         for filename, path, start in assigned_variants(auth_db, g.current_user.user_id, video_format)
-        if media_file(VIDEO_DIR, path) is not None
+        if media_file(VIDEO_DIR, path) is not None or cloud_entry(auth_db, filename) is not None
     ]
     # Pre-catalogue files keep their original names and channel-based access rules.
 
@@ -475,7 +481,7 @@ def get_video_list():
                 ):
                     recordings.append((timestamp.timestamp(), entry.name))
     except FileNotFoundError:
-        return jsonify(videos=[]), 200
+        pass  # Cloud-only catalogue entries remain visible without a local directory.
 
     recordings.sort(reverse=True)
 
@@ -508,7 +514,28 @@ def get_video(file_name):
     path = resolve_recording(user.user_id, file_name)
 
     if path is None:
-        return jsonify(status="ERROR", error="Recording unavailable"), 404
+        try:
+            remote = fetch_cloud_recording(auth_db, user.user_id, file_name,
+                                           lambda: configured_store(os.environ))
+        except Exception as exc:
+            app.logger.warning('Cloud playback unavailable: %s', type(exc).__name__)
+            return jsonify(status="ERROR", error="Cloud playback temporarily unavailable"), 503
+        if remote is None:
+            return jsonify(status="ERROR", error="Recording unavailable"), 404
+        stream, size = remote
+        try:
+            response = send_file(stream, download_name=file_name, mimetype='video/mp4',
+                                 conditional=False, etag=False)
+            response.content_length = size
+            response.make_conditional(request, accept_ranges=True, complete_length=size)
+            response.cache_control.private = True
+            response.cache_control.no_store = True
+            response.direct_passthrough = False
+            response.call_on_close(stream.close)
+            return response
+        except Exception:
+            stream.close()
+            raise
 
     mime_type = (
         "video/webm" if extension == ".webm" else "video/mp4"
@@ -639,22 +666,22 @@ def list_catalogue_recordings():
     are intentionally excluded from this endpoint and its gap calculations.
     """
     import_completed(auth_db, VIDEO_DIR)
+    # MP4: the variant every browser plays and the only one kept in the cloud,
+    # so recordings whose local copy has been cleaned up are still listed.
     rows = auth_db.conn.execute("""
         SELECT v.filename, c.id, c.name, c.channel_name,
                r.capture_start_utc, r.capture_end_utc,
-               v.duration_seconds, v.format
+               v.duration_seconds, v.format, v.path
           FROM recording_variants v
           JOIN recordings r ON r.id = v.recording_id
           JOIN cameras c ON c.id = r.camera_id
           JOIN user_cameras uc ON uc.camera_id = c.id
-         WHERE uc.user_id = ? AND c.enabled = 1 AND v.format = 'webm'
+         WHERE uc.user_id = ? AND c.enabled = 1 AND v.format = 'mp4'
          ORDER BY r.capture_start_utc DESC, v.filename
     """, (g.current_user.user_id,)).fetchall()
     items = []
-    for filename, camera_id, name, channel, start, end, duration, fmt in rows:
-        if media_file(VIDEO_DIR, auth_db.conn.execute(
-            "SELECT path FROM recording_variants WHERE filename = ?", (filename,)
-        ).fetchone()[0]) is None:
+    for filename, camera_id, name, channel, start, end, duration, fmt, path in rows:
+        if media_file(VIDEO_DIR, path) is None and cloud_entry(auth_db, filename) is None:
             continue
         items.append({
             "filename": filename,
@@ -945,14 +972,43 @@ def save_incident():
     if not isinstance(notes, str) or "\x00" in notes:
         return jsonify(success=False, error="notes must be a text value"), 400
 
-    # Per-camera permission check before any footage is reached.
-    if resolve_recording(user.user_id, file_name) is None:
-        return jsonify(success=False, error="Recording unavailable"), 404
-
-    incident_id = incident_manager().create_incident_clip(
-        file_name, start_time, end_time, user.user_id,
-        title=title.strip(), notes=notes
-    )
+    # Protect a local source before extraction; remote fetches take their own
+    # transfer hold and provide an independent verified temporary copy.
+    hold = acquire_local_job_hold(auth_db, user.user_id, file_name)
+    remote = None
+    try:
+        if resolve_recording(user.user_id, file_name) is not None:
+            incident_id = incident_manager().create_incident_clip(
+                file_name, start_time, end_time, user.user_id,
+                title=title.strip(), notes=notes)
+        else:
+            # A new incident hold must not extend an already expired cloud-only
+            # source. Release the local-only hold before cloud eligibility checks.
+            release_job_hold(auth_db, hold)
+            hold = None
+            try:
+                remote = fetch_cloud_recording(auth_db, user.user_id, file_name,
+                                               lambda: configured_store(os.environ))
+            except Exception as exc:
+                app.logger.warning('Cloud incident source unavailable: %s', type(exc).__name__)
+                return jsonify(success=False, error="Cloud playback temporarily unavailable"), 503
+            if remote is None:
+                return jsonify(success=False, error="Recording unavailable"), 404
+            stream, _ = remote
+            with tempfile.TemporaryDirectory(prefix='incident-source-') as directory:
+                source = Path(directory, 'source.mp4')
+                with source.open('wb') as output:
+                    shutil.copyfileobj(stream, output)
+                manager = incident_manager()
+                manager.source_resolver = lambda name, uid: source if (
+                    name == file_name and assigned_variants(auth_db, uid, 'mp4', name)) else None
+                incident_id = manager.create_incident_clip(
+                    file_name, start_time, end_time, user.user_id,
+                    title=title.strip(), notes=notes)
+    finally:
+        release_job_hold(auth_db, hold)
+        if remote is not None:
+            remote[0].close()
     if incident_id is None:
         # SAF-02: report failure unless the archived clip was verified.
         return jsonify(

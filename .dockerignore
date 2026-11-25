@@ -6,3 +6,5 @@ data
 **/__pycache__
 .git
 **/*:Zone.Identifier
+# Local cloud credentials
+.env.cloud

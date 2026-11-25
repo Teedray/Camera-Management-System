@@ -9,5 +9,6 @@ certs/
 scripts/smart-sec-cam.service
 backend/build/
 
-# Python virtual environments
+# Local cloud credentials and Python virtual environments
+.env.cloud
 .venv/

@@ -1,0 +1,16 @@
+# Optional worker: use together with docker-compose.yml after configuring .env.cloud.
+services:
+  server:
+    env_file: .env.cloud
+  cloud-worker:
+    build:
+      context: .
+      dockerfile: backend/smart_sec_cam/video/Dockerfile.cloud
+    profiles: [cloud]
+    env_file: .env.cloud
+    environment:
+      VIDEO_DIR: /backend/data/videos
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./data/:/backend/data/
+    restart: unless-stopped
