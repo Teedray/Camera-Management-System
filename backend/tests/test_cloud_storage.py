@@ -149,6 +149,39 @@ class CloudTests(unittest.TestCase):
         self.assertEqual(len(self.store.objects), 2)
         self.assertEqual(archive.read_bytes(), b'important saved copy')
 
+    def test_incident_saved_under_its_archive_name_protects_its_source(self):
+        # Real incident records store the archived clip's name in filename and
+        # the recording it was cut from in source_filename (merge branch schema).
+        from smart_sec_cam.video.incident_database import IncidentDatabase
+        IncidentDatabase(conn=self.db.conn)
+        columns = {row[1] for row in self.db.conn.execute('PRAGMA table_info(incident_clips)')}
+        if 'source_filename' not in columns:
+            self.db.conn.execute('ALTER TABLE incident_clips ADD COLUMN source_filename TEXT')
+        with self.db.conn:
+            self.db.conn.execute(
+                "INSERT INTO incident_clips (id, filename, camera, start_time, end_time, incident_flag, source_filename) "
+                "VALUES ('incident', 'incident_front_0_100_" + 'a' * 32 + ".mp4', 'front', 0, 10, 1, 'front.mp4')")
+        self.queue.local_cleanup = self.queue.cleanup = True
+        self.queue.tick(self.now)
+        self.queue.tick(self.now + timedelta(days=31))
+        self.assertEqual(len(self.local_files()), 2)
+        self.assertEqual(len(self.store.objects), 2)
+
+    def test_incident_without_a_source_does_not_protect_unrelated_footage(self):
+        from smart_sec_cam.video.incident_database import IncidentDatabase
+        IncidentDatabase(conn=self.db.conn)
+        columns = {row[1] for row in self.db.conn.execute('PRAGMA table_info(incident_clips)')}
+        if 'source_filename' not in columns:
+            self.db.conn.execute('ALTER TABLE incident_clips ADD COLUMN source_filename TEXT')
+        with self.db.conn:
+            self.db.conn.execute(
+                "INSERT INTO incident_clips (id, filename, camera, start_time, end_time, incident_flag, source_filename) "
+                "VALUES ('other', 'incident_other.mp4', 'front', 0, 10, 1, NULL)")
+        self.queue.local_cleanup = self.queue.cleanup = True
+        self.queue.tick(self.now)
+        self.queue.tick(self.now + timedelta(days=31))
+        self.assertFalse(self.store.objects)
+
     def test_delay_past_local_hour_still_uploads_with_original_thirty_day_expiry(self):
         self.queue.tick(self.now + timedelta(days=2))
         self.assertEqual(self.states(), ['uploaded', 'uploaded'])

@@ -251,11 +251,14 @@ class CloudQueue:
 def recording_protected(conn, rid):
     if conn.execute('SELECT 1 FROM cloud_holds WHERE recording_id=?', (rid,)).fetchone():
         return True
-    # Existing incident archives are separate files. Also conservatively
-    # protect an original if a legacy incident record references its name.
+    # Existing incident archives are separate files. Also protect the recording
+    # an incident was cut from: incident_clips.source_filename names it, while
+    # filename is the archived clip's own name (still matched for legacy rows).
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name='incident_clips'").fetchone():
+        columns = {row[1] for row in conn.execute('PRAGMA table_info(incident_clips)')}
+        names = 'i.filename, i.source_filename' if 'source_filename' in columns else 'i.filename'
         return conn.execute('''SELECT 1 FROM incident_clips i
-            JOIN recording_variants v ON v.filename=i.filename
+            JOIN recording_variants v ON v.filename IN (''' + names + ''')
             WHERE v.recording_id=? AND i.incident_flag=1''', (rid,)).fetchone() is not None
     return False
 
