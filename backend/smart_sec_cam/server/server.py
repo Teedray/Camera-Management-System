@@ -888,6 +888,12 @@ def update_camera_assignment(user_id, camera_id):
 @app.route("/api/v1/exports", methods=["POST"])
 @require_token
 def download_export():
+    # Trimming and downloading footage is a management action (UC05), like saving
+    # incidents. g.current_user is loaded from the database on every request, so a
+    # demoted user loses export access at once, even with an older token.
+    if g.current_user.role not in INCIDENT_ROLES:
+        return jsonify(error="Manager or administrator role required"), 403
+
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify(error="Expected a JSON object"), 400
