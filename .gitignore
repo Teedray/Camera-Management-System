@@ -8,3 +8,6 @@ venv
 certs/
 scripts/smart-sec-cam.service
 backend/build/
+
+# Python virtual environments
+.venv/
