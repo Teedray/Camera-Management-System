@@ -1,3 +1,4 @@
+import re
 import sqlite3
 from pathlib import Path
 
@@ -66,17 +67,54 @@ class IncidentDatabase:
                 "ADD COLUMN created_at TEXT"
             )
 
+		# The recording an incident was cut from. ``filename`` is the archived
+		# clip's own name, so retention cleanup needs this to keep the source.
+		if "source_filename" not in columns:
+			cursor.execute(
+                "ALTER TABLE incident_clips "
+                "ADD COLUMN source_filename TEXT"
+            )
+			self._backfill_source_filenames(cursor)
+
 		self.conn.commit()
 
+	def _backfill_source_filenames(self, cursor):
+		"""Recover the source of incidents saved before ``source_filename`` existed.
+
+		Catalogued recordings carry their 32-hex recording ID in the name, and the
+		archive name keeps it: incident_<channel>__<time>-<id>_<start>_<end>_<uuid>.mp4.
+		"""
+		if not cursor.execute(
+			"SELECT 1 FROM sqlite_master WHERE type='table' AND name='recording_variants'"
+		).fetchone():
+			return
+		rows = cursor.execute(
+			"SELECT id, filename FROM incident_clips WHERE source_filename IS NULL"
+		).fetchall()
+		for incident_id, archive_name in rows:
+			match = re.search(r"-([0-9a-f]{32})_\d+_\d+_[0-9a-f]{32}\.\w+$", archive_name)
+			if not match:
+				continue
+			source = cursor.execute(
+				"SELECT filename FROM recording_variants WHERE recording_id = ? "
+				"ORDER BY format = 'mp4' DESC LIMIT 1",
+				(match.group(1),)
+			).fetchone()
+			if source:
+				cursor.execute(
+					"UPDATE incident_clips SET source_filename = ? WHERE id = ?",
+					(source[0], incident_id)
+				)
+
 	def add_incident(self, clip_id, filename, camera, start_time, end_time, title="", notes="",
-			created_by=None, created_at=None):
+			created_by=None, created_at=None, source_filename=None):
 		cursor = self.conn.cursor()
 
 		cursor.execute("""
 			INSERT INTO incident_clips
 			(id, filename, camera, start_time, end_time, incident_flag, title, notes,
-			 created_by, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 created_by, created_at, source_filename)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		""", (
 			clip_id,
 			filename,
@@ -87,7 +125,8 @@ class IncidentDatabase:
 			title,
 			notes,
 			created_by,
-			created_at
+			created_at,
+			source_filename
 		))
 
 		self.conn.commit()

@@ -1,4 +1,5 @@
 """Integration of incident clips (F04) with the shared database and access control (F06/SR-06)."""
+import sqlite3
 import json
 import tempfile
 from pathlib import Path
@@ -8,6 +9,7 @@ import cv2
 import numpy as np
 
 from smart_sec_cam.video.catalogue import import_completed
+from smart_sec_cam.video.incident_database import IncidentDatabase
 from smart_sec_cam.video.writer import VideoWriter
 from test_admin_camera_api import AdminApiTestCase
 
@@ -177,3 +179,44 @@ class IncidentApiTest(AdminApiTestCase):
         ):
             with self.subTest(method=method, url=url):
                 self.assert_error(getattr(self.client, method)(url), 401, "Missing token")
+
+    # The recording an incident was cut from is stored, so retention cleanup can keep it.
+    def test_saved_incident_records_its_source_recording(self):
+        response = self.save()
+        self.assertEqual(response.status_code, 201, response.get_data(as_text=True))
+        incident_id = response.get_json()["data"]["id"]
+        archive_name, source = self.db.conn.execute(
+            "SELECT filename, source_filename FROM incident_clips WHERE id = ?", (incident_id,)
+        ).fetchone()
+        self.assertEqual(source, self.front)
+        self.assertNotEqual(archive_name, source)
+        # The source resolves to a catalogued recording, as retention cleanup needs.
+        recording = self.db.conn.execute(
+            "SELECT recording_id FROM recording_variants WHERE filename = ?", (source,)
+        ).fetchone()
+        self.assertIsNotNone(recording)
+
+    def test_incidents_saved_before_the_column_are_backfilled(self):
+        response = self.save()
+        incident_id = response.get_json()["data"]["id"]
+        conn = self.db.conn
+        # Rebuild the table as it was before source_filename existed.
+        conn.executescript("""
+            CREATE TABLE incident_old AS SELECT id, filename, camera, start_time, end_time,
+                incident_flag, title, notes, created_by, created_at FROM incident_clips;
+            DROP TABLE incident_clips;
+            ALTER TABLE incident_old RENAME TO incident_clips;
+        """)
+        conn.execute(
+            "INSERT INTO incident_clips VALUES ('legacy', 'some-old-clip.mp4', 'front-stream', 0, 1, 1, '', '', NULL, NULL)"
+        )
+        IncidentDatabase(conn=conn)
+        rows = dict(conn.execute("SELECT id, source_filename FROM incident_clips").fetchall())
+        self.assertEqual(rows[incident_id], self.front)
+        self.assertIsNone(rows["legacy"])   # no recording ID in the name: left unknown
+
+    def test_standalone_incident_database_still_opens(self):
+        conn = sqlite3.connect(":memory:")
+        IncidentDatabase(conn=conn)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(incident_clips)")}
+        self.assertIn("source_filename", columns)

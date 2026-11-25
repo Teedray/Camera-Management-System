@@ -228,7 +228,8 @@ class IncidentClipManager:
                 title,
                 notes,
                 created_by=user_id,
-                created_at=datetime.now(timezone.utc).isoformat()
+                created_at=datetime.now(timezone.utc).isoformat(),
+                source_filename=Path(filename).name
             )
 
         except Exception as error:
