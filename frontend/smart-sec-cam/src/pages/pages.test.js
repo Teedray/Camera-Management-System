@@ -107,6 +107,9 @@ describe("StatusPage", () => {
   });
 });
 
+// Long click-through flows over MUI dialogs and chips: give them room on slow CI machines.
+const ADMIN_FLOW_TIMEOUT = 20000;
+
 describe("AdminPage", () => {
   test("is closed to anyone who is not an administrator", async () => {
     useMe.mockReturnValue({ id: "u3", username: "viewer1", role: "viewer" });
@@ -138,7 +141,7 @@ describe("AdminPage", () => {
     await userEvent.type(screen.getByLabelText(/^Name/), "CAM_STOREROOM");
     await userEvent.click(screen.getByRole("button", { name: "Save camera" }));
     expect(await screen.findByRole("article", { name: "CAM_STOREROOM" })).toBeInTheDocument();
-  });
+  }, ADMIN_FLOW_TIMEOUT);
 
   test("changes which cameras a user can see", async () => {
     show(<AdminPage />);
@@ -150,7 +153,31 @@ describe("AdminPage", () => {
     await userEvent.click(within(row).getByRole("button", { name: "Save changes" }));
     expect(await screen.findByText("Saved viewer1.")).toBeInTheDocument();
     expect(mock.listUsers().find((u) => u.username === "viewer1").cameras).toEqual(["CAM_AISLES", "CAM_CASHIER"]);
-  });
+
+    // After the reload both cameras are still selected; removing one keeps the other.
+    const reloaded = await screen.findByRole("article", { name: "viewer1" });
+    expect(within(reloaded).getByRole("button", { name: "CAM_CASHIER" })).toHaveAttribute("aria-pressed", "true");
+    await userEvent.click(within(reloaded).getByRole("button", { name: "CAM_AISLES" }));
+    await userEvent.click(within(reloaded).getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mock.listUsers().find((u) => u.username === "viewer1").cameras).toEqual(["CAM_CASHIER"]));
+  }, ADMIN_FLOW_TIMEOUT);
+
+  test("a failed save shows the error, not success", async () => {
+    const spy = jest.spyOn(mock, "updateUser").mockImplementation(() => { throw new Error("Server unavailable"); });
+    try {
+      show(<AdminPage />);
+      await screen.findByRole("article", { name: "CAM_ENTRANCE" });
+      await userEvent.click(screen.getByRole("tab", { name: "Users" }));
+      const row = await screen.findByRole("article", { name: "viewer1" });
+      await userEvent.click(within(row).getByRole("button", { name: "CAM_CASHIER" }));
+      await userEvent.click(within(row).getByRole("button", { name: "Save changes" }));
+      expect(await screen.findByText("Server unavailable")).toBeInTheDocument();
+      expect(screen.queryByText("Saved viewer1.")).not.toBeInTheDocument();
+      expect(mock.listUsers().find((u) => u.username === "viewer1").cameras).not.toContain("CAM_CASHIER");
+    } finally {
+      spy.mockRestore();
+    }
+  }, ADMIN_FLOW_TIMEOUT);
 });
 
 describe("signed-out visitors", () => {

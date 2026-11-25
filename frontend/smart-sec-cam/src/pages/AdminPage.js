@@ -134,7 +134,8 @@ function UserRow({ user, cameraNames, onSave }) {
       <Button size="small" variant="contained" sx={{ mt: 1.5 }} disabled={!changed || busy}
               onClick={async () => {
                 setBusy(true);
-                try { await onSave(user, { role }); } finally { setBusy(false); }
+                // Send the camera choice too; administrators see every camera.
+                try { await onSave(user, { role, cameras: role === "admin" ? [] : cameras }); } finally { setBusy(false); }
               }}>
         Save changes
       </Button>
