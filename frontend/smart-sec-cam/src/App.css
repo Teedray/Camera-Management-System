@@ -1,35 +1,17 @@
-.App {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-}
-
-.app-container {
-  display: flex;
-  flex: 1;
-  overflow: hidden;
-}
-
-.sidebar {
-  display: flex;
-  flex-direction: column;
-  width: 150px;
-  overflow-y: auto;
-}
-
-.sidebar-item {
-  margin: 5px;
-  cursor: pointer;
-}
-
-.main-view {
-  flex: 1;
-  height: 100%;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  background-color: #000;
-  overflow: hidden;
-}
+.App { min-height:100vh; display:flex; flex-direction:column; background:var(--bg); }
+.app-container { display:grid; grid-template-columns:270px minmax(0,1fr); gap:22px; padding:26px; min-height:calc(100vh - 76px); }
+.sidebar { display:flex; flex-direction:column; gap:12px; overflow-y:auto; padding:20px 14px; background:var(--surface); border:1px solid var(--line); border-radius:16px; }
+.sidebar::before { content:'CAMERA FEEDS'; font-size:11px; letter-spacing:.16em; color:var(--muted); font-weight:800; padding:0 8px 7px; }
+.sidebar-item { display:block; border:1px solid var(--line); background:#0d1726; padding:7px; border-radius:12px; cursor:pointer; transition:transform .2s,border-color .2s,background .2s; }
+.sidebar-item:hover,.sidebar-item:focus-visible { border-color:#648cff; background:#1d2d47; transform:translateY(-1px); outline:none; }
+.sidebar-item.selected { border-color:var(--accent); box-shadow:0 0 0 1px #648cff66; }
+.sidebar-item .imageviewer.preview { border-radius:7px; }
+.main-view { min-width:0; display:flex; flex-direction:column; gap:12px; background:var(--surface); border:1px solid var(--line); border-radius:16px; padding:20px; }
+.monitor-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; }
+.monitor-heading h1 { margin:0; font-size:22px; font-weight:750; letter-spacing:-.04em; }
+.monitor-heading p { margin:5px 0 0; color:var(--muted); font-size:13px; }
+.monitor-status { display:inline-flex; align-items:center; gap:8px; border:1px solid #34d39933; border-radius:99px; padding:7px 12px; font-size:11px; font-weight:750; color:#6fe5b1; background:#34d39912; }
+.monitor-status::before { content:''; width:7px; height:7px; border-radius:50%; background:#34d399; }
+.monitor-screen { flex:1; min-height:400px; overflow:hidden; background:#050b14; border:1px solid var(--line); border-radius:12px; display:grid; place-items:center; }
+.monitor-empty { text-align:center; color:var(--muted); font-size:14px; padding:20px; }
+@media(max-width:850px) { .app-container { grid-template-columns:1fr; padding:14px; gap:14px; } .sidebar { flex-direction:row; overflow-x:auto; padding:12px; } .sidebar::before { display:none; } .sidebar-item { min-width:145px; } .monitor-screen { min-height:300px; } }

@@ -594,6 +594,72 @@ def change_user_role(user_id):
     return jsonify(success=True, data=profile), 200
 
 
+
+@app.route("/api/v1/admin/cameras", methods=["GET"])
+@require_administrator
+def list_all_cameras_for_admin():
+    rows = auth_db.conn.execute(
+        "SELECT id, name, location, channel_name, enabled "
+        "FROM cameras ORDER BY name, id"
+    ).fetchall()
+    return jsonify(success=True, data={"items": [
+        {"id": row[0], "name": row[1], "location": row[2],
+         "channel_name": row[3], "enabled": bool(row[4])}
+        for row in rows
+    ]}), 200
+
+
+@app.route("/api/v1/admin/assignments", methods=["GET"])
+@require_administrator
+def list_all_camera_assignments_for_admin():
+    rows = auth_db.conn.execute(
+        "SELECT user_id, camera_id FROM user_cameras ORDER BY user_id, camera_id"
+    ).fetchall()
+    return jsonify(success=True, data={"items": [
+        {"user_id": row[0], "camera_id": row[1]}
+        for row in rows
+    ]}), 200
+
+
+@app.route("/api/v1/recordings", methods=["GET"])
+@require_token
+def list_catalogue_recordings():
+    """Timestamped, permitted, completed catalogue items for the review UI.
+
+    Legacy filename-only recordings cannot be given accurate durations and
+    are intentionally excluded from this endpoint and its gap calculations.
+    """
+    import_completed(auth_db, VIDEO_DIR)
+    rows = auth_db.conn.execute("""
+        SELECT v.filename, c.id, c.name, c.channel_name,
+               r.capture_start_utc, r.capture_end_utc,
+               v.duration_seconds, v.format
+          FROM recording_variants v
+          JOIN recordings r ON r.id = v.recording_id
+          JOIN cameras c ON c.id = r.camera_id
+          JOIN user_cameras uc ON uc.camera_id = c.id
+         WHERE uc.user_id = ? AND c.enabled = 1 AND v.format = 'webm'
+         ORDER BY r.capture_start_utc DESC, v.filename
+    """, (g.current_user.user_id,)).fetchall()
+    items = []
+    for filename, camera_id, name, channel, start, end, duration, fmt in rows:
+        if media_file(VIDEO_DIR, auth_db.conn.execute(
+            "SELECT path FROM recording_variants WHERE filename = ?", (filename,)
+        ).fetchone()[0]) is None:
+            continue
+        items.append({
+            "filename": filename,
+            "camera_id": camera_id,
+            "camera_name": name,
+            "channel_name": channel,
+            "start": start,
+            "end": end,
+            "duration_seconds": duration,
+            "format": fmt,
+        })
+    return jsonify(success=True, data={"items": items}), 200
+
+
 @app.route("/api/v1/cameras", methods=["GET"])
 @require_token
 def list_assigned_cameras():

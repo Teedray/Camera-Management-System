@@ -1,1 +1,8 @@
 data
+# Exclude local dependencies and generated files
+**/node_modules
+**/build
+**/.venv
+**/__pycache__
+.git
+**/*:Zone.Identifier

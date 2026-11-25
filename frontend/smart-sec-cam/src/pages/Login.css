@@ -1,8 +1,17 @@
-.Login {
-    font-family: monospace;
-    background-color: #2e2e2e;
-    color: white;
-    min-height: 100vh;
-    min-width: 100vw;
-}
-
+.auth-page { min-height:100vh; display:grid; grid-template-columns:minmax(380px,1.08fr) minmax(440px,1fr); background:#0b1220; }
+.auth-art { position:relative; min-height:100vh; display:flex; flex-direction:column; justify-content:space-between; padding:48px clamp(32px,6vw,90px); overflow:hidden; background:radial-gradient(ellipse at 72% 30%,#234b8b 0%,transparent 45%),linear-gradient(150deg,#182e55,#0d1b31 50%,#081321); border-right:1px solid #20344c; }
+.auth-art::after { content:''; position:absolute; width:620px;height:620px; border:1px solid #78a5ff20; border-radius:50%; top:10%;right:-190px; box-shadow:0 0 0 90px #648cff08,0 0 0 180px #648cff05; pointer-events:none; }
+.auth-brand { display:flex;align-items:center;gap:12px; font-size:23px;font-weight:800;letter-spacing:-.05em; z-index:1; }
+.auth-logo {width:44px;height:44px;display:grid;place-items:center;border-radius:12px;background:#547ffa;color:white;font-size:28px;}
+.auth-brand-accent {color:#82a6ff;}
+.auth-eyebrow {display:block; color:#8daafa;font-size:11px;letter-spacing:.22em;font-weight:800;}
+.auth-art-content {position:relative;z-index:1;max-width:530px;}
+.auth-art-content h2 {white-space:pre-line;font-size:clamp(40px,4.8vw,72px);line-height:1.12;letter-spacing:-.07em;margin:24px 0;}
+.auth-art-content p {max-width:400px;color:#acbdd5;line-height:1.8;font-size:15px;}
+.auth-art-line {height:3px;width:68px;background:#668fff;margin-top:36px;border-radius:4px;}
+.auth-art-bottom {font-size:10px;letter-spacing:.18em;color:#8299b7;font-weight:700;z-index:1;}
+.auth-form-side {display:grid;place-items:center;padding:36px 26px;}
+.auth-card {width:100%;max-width:405px;}
+.auth-mobile-brand {display:none;}
+.auth-footer {text-align:center;margin-top:45px;font-size:12px;color:#62738e;}
+@media(max-width:850px) { .auth-page {grid-template-columns:1fr;} .auth-art {display:none;} .auth-form-side {min-height:100vh;} .auth-mobile-brand {display:block;font-weight:800;color:#86a3ff;margin-bottom:55px;font-size:18px;} }
