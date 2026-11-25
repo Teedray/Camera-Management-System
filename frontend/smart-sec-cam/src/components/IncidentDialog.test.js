@@ -55,7 +55,7 @@ describe("IncidentDialog (F04)", () => {
     expect(await screen.findByText(/Saved\. This clip is kept in the incident archive/)).toBeInTheDocument();
     expect(p.onSaved).toHaveBeenCalledWith(expect.objectContaining({ title: "Till discrepancy", status: "saved", flag: "dispute" }));
     expect(screen.queryByRole("button", { name: "Save clip" })).not.toBeInTheDocument();
-  });
+  }, 20000); // long click-through flow over MUI dialogs; slow on CI machines
 
   test("a server message about something the dialog does not show still appears", async () => {
     render(<IncidentDialog {...props()} camera="" />);

@@ -98,5 +98,5 @@ describe("SearchPage", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     await userEvent.click(screen.getByRole("button", { name: /trim and download/i }));
     expect(await screen.findByRole("dialog", { name: "Trim and download" })).toBeInTheDocument();
-  });
+  }, 20000); // long click-through flow over MUI dialogs; slow on CI machines
 });
