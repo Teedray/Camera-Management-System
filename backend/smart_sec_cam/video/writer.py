@@ -10,7 +10,7 @@ import cv2
 
 
 from smart_sec_cam.video.catalogue import MEDIA_DIR, QUEUE_DIR
-from smart_sec_cam.video.h264 import open_mp4_writer
+from smart_sec_cam.video.h264 import open_mp4_writer, open_webm_writer
 
 
 class VideoWriter:
@@ -57,7 +57,8 @@ class VideoWriter:
                 # H.264, so the MP4 (the copy kept in the cloud) plays in every browser.
                 writer = open_mp4_writer(path, fps, self.resolution)
             else:
-                writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"VP90"), fps, self.resolution)
+                # Real-time VP9: OpenCV's own VP9 encoder is too slow for continuous recording.
+                writer = open_webm_writer(path, fps, self.resolution)
             try:
                 if not writer.isOpened():
                     raise RuntimeError(f"Cannot encode {fmt} recording")
