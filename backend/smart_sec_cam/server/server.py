@@ -1029,5 +1029,8 @@ if __name__ == '__main__':
 
     socketio.start_background_task(register_completed_recordings)
     socketio.start_background_task(listen_for_images, args.redis_url, args.redis_port)
-    socketio.run(app, host='0.0.0.0', port="8443", debug=True, certfile='certs/sec-cam-server.cert',
+    # The Werkzeug debugger serves an interactive Python console at /console, so it
+    # stays off unless a developer explicitly sets FLASK_DEBUG=1 on their own machine.
+    debug = os.environ.get("FLASK_DEBUG") == "1"
+    socketio.run(app, host='0.0.0.0', port="8443", debug=debug, certfile='certs/sec-cam-server.cert',
                  keyfile='certs/sec-cam-server.key')
