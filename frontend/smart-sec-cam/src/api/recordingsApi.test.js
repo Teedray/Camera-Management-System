@@ -1,4 +1,4 @@
-import { ApiError, fetchCameras, searchRecordings, streamUrl } from "./recordingsApi";
+import { ApiError, fetchCameras, listRecordings, searchRecordings, streamUrl } from "./recordingsApi";
 
 jest.mock("../config", () => ({ SERVER_URL: "https://localhost:8443", USE_MOCK: false }));
 
@@ -8,24 +8,40 @@ function reply(status, body) {
 
 beforeEach(() => { global.fetch = jest.fn(); });
 
+// Real mode: the search page loads the caller's catalogue from GET /api/v1/recordings
+// (the server returns only cameras assigned to that user) and filters it by camera
+// and time in the page; videos play from /api/video/<encoded filename>.
 describe("recordings API", () => {
-  test("search sends the token and the form values as the server expects", async () => {
-    fetch.mockReturnValue(reply(200, { status: "OK", segments: [], gaps: [] }));
-    await searchRecordings({ camera: "CAM_A", date: "2026-11-18", start: "09:00", end: "10:00" }, "tok");
+  const item = {
+    filename: "CAM_FRONT_DESK__2026-11-25_03:48:00-4a5f5c38ee844324854c28f3da2d87f1.mp4",
+    camera_id: "CAM_FRONT_DESK", start: "2026-11-25T03:48:00+00:00", end: "2026-11-25T03:48:30+00:00",
+    duration_seconds: 30, format: "mp4",
+  };
+
+  test("the catalogue is fetched with the login token and returned as items", async () => {
+    fetch.mockReturnValue(reply(200, { success: true, data: { items: [item] } }));
+    await expect(listRecordings("tok")).resolves.toEqual([item]);
     const [url, options] = fetch.mock.calls[0];
-    expect(url).toBe("https://localhost:8443/api/recordings?camera=CAM_A&date=2026-11-18&start=09%3A00&end=10%3A00");
+    expect(url).toBe("https://localhost:8443/api/v1/recordings");
+    expect(options.method).toBe("GET");
     expect(options.headers["x-access-token"]).toBe("tok");
   });
 
-  test("a validation error keeps the server's message and the field it belongs to", async () => {
-    fetch.mockReturnValue(reply(400, { status: "ERROR", error: "The end time must be after the start time.", field: "end" }));
-    await expect(searchRecordings({}, "tok")).rejects.toMatchObject({
-      name: "ApiError", message: "The end time must be after the start time.", field: "end", status: 400 });
+  test("a server error keeps the server's message, status and field", async () => {
+    fetch.mockReturnValue(reply(400, { success: false, error: "start must be before end", field: "end" }));
+    await expect(listRecordings("tok")).rejects.toMatchObject({
+      name: "ApiError", message: "start must be before end", field: "end", status: 400 });
   });
 
-  test("TS-03-06: an unauthorised camera surfaces as a 403 with the server's message", async () => {
-    fetch.mockReturnValue(reply(403, { status: "ERROR", error: "You do not have access to this camera.", field: "camera" }));
-    await expect(searchRecordings({}, "tok")).rejects.toMatchObject({ status: 403, field: "camera" });
+  test("TS-03-06: an unauthorised request surfaces as a 403 with the server's message", async () => {
+    fetch.mockReturnValue(reply(403, { success: false, error: "Manager or administrator role required" }));
+    await expect(listRecordings("tok")).rejects.toMatchObject({
+      status: 403, message: "Manager or administrator role required" });
+  });
+
+  test("real mode does not fall back to the demo search", async () => {
+    await expect(searchRecordings({ camera: "CAM_A" }, "tok")).rejects.toBeInstanceOf(ApiError);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   test("an expired login asks the user to sign in again", async () => {
@@ -45,7 +61,8 @@ describe("recordings API", () => {
     await expect(fetchCameras("tok")).rejects.toMatchObject({ status: 500 });
   });
 
-  test("stream URLs carry the token and format in the query string", () => {
-    expect(streamUrl(7, "a b", "mp4")).toBe("https://localhost:8443/api/recordings/7/stream?format=mp4&token=a%20b");
+  test("video URLs encode the recording filename and carry the token", () => {
+    expect(streamUrl(item.filename, "a b")).toBe(
+      "https://localhost:8443/api/video/CAM_FRONT_DESK__2026-11-25_03%3A48%3A00-4a5f5c38ee844324854c28f3da2d87f1.mp4?token=a%20b");
   });
 });

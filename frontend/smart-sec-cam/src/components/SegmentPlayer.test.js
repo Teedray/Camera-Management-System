@@ -5,7 +5,10 @@ import { toSegments } from "../utils/playbackPlan";
 
 jest.mock("../config", () => ({ SERVER_URL: "https://localhost:8443", USE_MOCK: false }));
 
-const clip = (id, start) => ({ id, start, end: new Date(Date.parse(start) + 30000).toISOString(), formats: ["webm"] });
+// Real recordings are addressed by catalogue filename (channel__start-<recording id>.mp4).
+const filename = (n, start) =>
+  `CAM_FRONT_DESK__${start.slice(0, 10)}_${start.slice(11, 19)}-${String(n).padStart(32, "0")}.mp4`;
+const clip = (n, start) => ({ id: filename(n, start), start, end: new Date(Date.parse(start) + 30000).toISOString(), formats: ["mp4"] });
 const contiguous = toSegments([
   clip(1, "2026-11-18T14:00:00.000Z"), clip(2, "2026-11-18T14:00:30.000Z"), clip(3, "2026-11-18T14:01:00.000Z"),
 ]);
@@ -26,10 +29,20 @@ function setup(segments, ms = segments[0].startMs, play = true) {
   b.play = jest.fn(() => Promise.resolve());
   return { a, b };
 }
-const idIn = (video) => Number((video.getAttribute("src") || "").match(/recordings\/(\d+)\//)?.[1]);
+// Which clip a <video> holds, read back from its /api/video/<encoded filename> URL.
+const idIn = (video) => {
+  const path = (video.getAttribute("src") || "").match(/\/api\/video\/([^?]+)/)?.[1];
+  return Number(path && decodeURIComponent(path).match(/-(\d{32})\.mp4$/)?.[1]);
+};
 const visible = (video) => video.style.opacity === "1";
 
 describe("SegmentPlayer", () => {
+  test("plays recordings from their encoded filename URL with the login token", () => {
+    const { a } = setup(contiguous);
+    expect(a.getAttribute("src")).toBe(
+      "https://localhost:8443/api/video/CAM_FRONT_DESK__2026-11-18_14%3A00%3A00-" + "0".repeat(31) + "1.mp4?token=tok");
+  });
+
   test("PR-03: back-to-back clips play with no reload; the buffered clip takes over", () => {
     const { a, b } = setup(contiguous);
     expect(idIn(a)).toBe(1);

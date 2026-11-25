@@ -36,12 +36,12 @@ describe("Login (real server)", () => {
     expect(mockNavigate).not.toHaveBeenCalled();
   });
 
-  test("a correct login opens the live view", async () => {
+  test("a correct login opens the dashboard", async () => {
     server({ login: { status: "OK", token: "abc" } });
     show();
     await signIn();
     await screen.findByRole("button", { name: "Login" });
-    expect(mockNavigate).toHaveBeenCalledWith("/stream");
+    expect(mockNavigate).toHaveBeenCalledWith("/dashboard");
   });
 
   test("an unreachable server shows a message instead of crashing the page", async () => {

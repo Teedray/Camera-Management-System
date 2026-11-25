@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { CookiesProvider } from "react-cookie";
 import userEvent from "@testing-library/user-event";
 
@@ -21,14 +21,18 @@ describe("NavBar", () => {
     useMe.mockReturnValue({ role: "admin" });
     show(<NavBar token="t" />);
     const nav = screen.getByRole("navigation", { name: "Main" });
-    ["Live", "Search", "Incidents", "Exports", "Status", "Videos", "Admin"].forEach((label) =>
-      expect(nav).toHaveTextContent(label));
+    ["Dashboard", "Live", "Search", "Incidents", "Exports", "Merge", "Videos", "Status",
+     "Administration", "Cloud", "Storage", "Audit logs"].forEach((label) =>
+      expect(within(nav).getByRole("button", { name: label })).toBeInTheDocument());
   });
 
   test("other roles do not see Admin", () => {
     useMe.mockReturnValue({ role: "viewer" });
     show(<NavBar token="t" />);
-    expect(screen.getByRole("navigation", { name: "Main" })).not.toHaveTextContent("Admin");
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    ["Exports", "Merge", "Administration", "Cloud", "Storage", "Audit logs"].forEach((label) =>
+      expect(within(nav).queryByRole("button", { name: label })).not.toBeInTheDocument());
+    expect(within(nav).getByRole("button", { name: "Search" })).toBeInTheDocument();
   });
 
   test("marks the current page and navigates when a link is pressed", async () => {
@@ -36,24 +40,24 @@ describe("NavBar", () => {
     show(<NavBar token="t" />);
     expect(screen.getByRole("button", { name: "Incidents" })).toHaveAttribute("aria-current", "page");
     await userEvent.click(screen.getByRole("button", { name: "Exports" }));
-    expect(mockNavigate).toHaveBeenCalledWith("/exports", { state: { token: "t" } });
+    expect(mockNavigate).toHaveBeenCalledWith("/exports");
   });
 
   test("on a phone the menu button opens a list of the same pages", async () => {
     useMe.mockReturnValue({ role: "admin" });
     show(<NavBar token="t" />);
-    await userEvent.click(screen.getByRole("button", { name: "menu" }));
+    await userEvent.click(screen.getByRole("button", { name: "Open navigation menu" }));
     const menu = await screen.findByRole("list", { name: "Menu" });
-    expect(menu).toHaveTextContent("Admin");
-    await userEvent.click(screen.getByRole("button", { name: "Status" }));
-    expect(mockNavigate).toHaveBeenCalledWith("/status", { state: { token: "t" } });
+    expect(menu).toHaveTextContent("Administration");
+    await userEvent.click(within(menu).getByRole("button", { name: "Status" }));
+    expect(mockNavigate).toHaveBeenCalledWith("/status");
   });
 
   test("shows who is signed in, and signing out clears the login and returns to the login page", async () => {
     useMe.mockReturnValue({ role: "admin", username: "owner" });
     document.cookie = "token=abc; path=/";
     show(<NavBar token="t" />);
-    expect(screen.getByText("owner (admin)")).toBeInTheDocument();
+    expect(screen.getByText("owner · admin")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Sign out" }));
     expect(mockNavigate).toHaveBeenCalledWith("/");
     expect(document.cookie).not.toContain("token=");

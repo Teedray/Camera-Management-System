@@ -71,8 +71,8 @@ export default function Login(props) {
 
     React.useEffect(() => {
         if (token != null && hasValidToken) {
-            // Navigate to video stream page
-            navigate('/stream', {state: { token: token }});
+            // Already signed in: the same landing page as a fresh login.
+            navigate('/dashboard');
         }
     }, [token])
 
