@@ -608,12 +608,12 @@ def change_user_role(user_id):
 @require_administrator
 def list_all_cameras_for_admin():
     rows = auth_db.conn.execute(
-        "SELECT id, name, location, channel_name, enabled "
+        "SELECT id, name, location, channel_name, enabled, stream_address "
         "FROM cameras ORDER BY name, id"
     ).fetchall()
     return jsonify(success=True, data={"items": [
         {"id": row[0], "name": row[1], "location": row[2],
-         "channel_name": row[3], "enabled": bool(row[4])}
+         "channel_name": row[3], "enabled": bool(row[4]), "stream_address": row[5]}
         for row in rows
     ]}), 200
 

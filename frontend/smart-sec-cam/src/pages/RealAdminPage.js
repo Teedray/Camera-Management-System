@@ -70,13 +70,14 @@ export default function RealAdminPage() {
   async function saveCameraEdit(event) {
     event.preventDefault(); setBusy(true); setError("");
     try {
-      if (!editingCamera.name.trim() || !editingCamera.channel_name.trim() || !editingCamera.location.trim()) throw new Error("Complete required fields.");
-      if (editingCamera.stream_address && !/^(rtsp|rtsps|http|https):\/\/[^\s]+$/i.test(editingCamera.stream_address)) throw new Error("Use an RTSP or HTTP(S) stream address.");
-      await patchCamera(token, editingCamera.id, {
-        name: editingCamera.name.trim(), location: editingCamera.location.trim(),
-        channel_name: editingCamera.channel_name.trim(), enabled: Boolean(editingCamera.enabled),
-        stream_address: editingCamera.stream_address || null,
-      });
+      if (!editingCamera.name.trim() || !editingCamera.location.trim()) throw new Error("Complete required fields.");
+      const address = (editingCamera.stream_address || "").trim();
+      if (address && !/^(rtsp|http|https):\/\/[^\s]+$/i.test(address) && !/^\d+$/.test(address)) throw new Error("Use an RTSP or HTTP(S) stream address, or a USB camera number.");
+      // The server accepts only name, location and stream_address (PATCH /api/v1/cameras/:id).
+      // The channel links a camera to its recordings, so it is fixed after registration.
+      const changes = { name: editingCamera.name.trim(), location: editingCamera.location.trim() };
+      if (address) changes.stream_address = address;
+      await patchCamera(token, editingCamera.id, changes);
       setDialog(""); setEditingCamera(null); setNotice("Camera settings saved by backend."); await load();
     } catch (err) { setError(explainUnsupported(err, "Editing a camera")); }
     finally { setBusy(false); }
@@ -151,11 +152,10 @@ export default function RealAdminPage() {
         {cameras.map(c => <Paper key={c.id} sx={{ p: 2 }}>
           <Box sx={{ display:"flex", justifyContent:"space-between", gap: 1 }}>
             <Typography fontWeight={600}>{c.name}</Typography>
-            <Box sx={{display:"flex",gap:1}}><Chip size="small" label={c.enabled ? "Enabled" : "Disabled"}/><Button size="small" variant="outlined" onClick={()=>{setEditingCamera({...c,stream_address:c.stream_address||""});setDialog("edit-camera");}}>Edit / enable</Button></Box>
+            <Box sx={{display:"flex",gap:1}}><Chip size="small" label={c.enabled ? "Enabled" : "Disabled"}/><Button size="small" variant="outlined" onClick={()=>{setEditingCamera({...c,stream_address:c.stream_address||""});setDialog("edit-camera");}}>Edit</Button></Box>
           </Box>
           <Typography variant="body2" color="text.secondary">{c.location} · Channel: {c.channel_name} · ID: {c.id}</Typography>
         </Paper>)}
-        <Typography variant="caption" color="text.secondary">Editing and stream configuration forms require the PATCH camera endpoint. The running backend currently lacks it.</Typography>
       </Box>}
       {tab === 1 && <Box sx={{ display: "grid", gap: 1.5 }}>
         <Box><Button variant="contained" onClick={() => setDialog("user")}>Add user</Button></Box>
@@ -186,8 +186,7 @@ export default function RealAdminPage() {
       <Box component="form" onSubmit={createCameraAction}><DialogContent sx={{ display:"grid",gap:2 }}>
         {[["id","Camera ID"],["name","Display name"],["location","Location"],["channel_name","Recording channel name"]].map(([key,label]) =>
           <TextField key={key} label={label} required value={newCamera[key]} onChange={e => setNewCamera(p => ({...p,[key]:e.target.value}))}/>)}
-        <TextField label="Stream address (optional)" placeholder="rtsp://host/stream" value={streamAddress} onChange={e=>setStreamAddress(e.target.value)} helperText="The server must support camera address configuration to persist this field."/>
-        <Alert severity="info">Registration is separate from stream configuration. If the backend lacks camera PATCH, an entered address will not be saved.</Alert>
+        <TextField label="Stream address (optional)" placeholder="rtsp://host/stream" value={streamAddress} onChange={e=>setStreamAddress(e.target.value)} helperText="Saved after the camera is registered."/>
       </DialogContent><DialogActions><Button disabled={busy} onClick={() => setDialog("")}>Cancel</Button>
         <Button disabled={busy} variant="contained" type="submit">Register</Button></DialogActions></Box>
     </Dialog>
@@ -195,10 +194,10 @@ export default function RealAdminPage() {
       <DialogTitle>Edit camera settings</DialogTitle>
       {editingCamera && <Box component="form" onSubmit={saveCameraEdit}><DialogContent sx={{display:"grid",gap:2}}>
         <Typography variant="caption" color="text.secondary">Camera ID: {editingCamera.id}</Typography>
-        {[["name","Camera name"],["location","Location"],["channel_name","Recording channel"]].map(([key,label])=><TextField key={key} required label={label} value={editingCamera[key]||""} onChange={e=>setEditingCamera(c=>({...c,[key]:e.target.value}))}/>)}
-        <TextField label="Stream address" value={editingCamera.stream_address||""} onChange={e=>setEditingCamera(c=>({...c,stream_address:e.target.value}))} placeholder="rtsp://host/stream"/>
-        <TextField select label="Camera status" value={editingCamera.enabled?"enabled":"disabled"} onChange={e=>setEditingCamera(c=>({...c,enabled:e.target.value==="enabled"}))}><MenuItem value="enabled">Enabled</MenuItem><MenuItem value="disabled">Disabled</MenuItem></TextField>
-        <Alert severity="info">Saving requires backend PATCH /api/v1/cameras/:id. No local-only changes will be shown as persisted.</Alert>
+        {[["name","Camera name"],["location","Location"]].map(([key,label])=><TextField key={key} required label={label} value={editingCamera[key]||""} onChange={e=>setEditingCamera(c=>({...c,[key]:e.target.value}))}/>)}
+        <TextField label="Recording channel" value={editingCamera.channel_name||""} disabled helperText="Fixed after registration: it links the camera to its recordings."/>
+        <TextField label="Stream address" value={editingCamera.stream_address||""} onChange={e=>setEditingCamera(c=>({...c,stream_address:e.target.value}))} placeholder="rtsp://host/stream" helperText="Leave blank to keep the current address."/>
+        <TextField label="Camera status" value={editingCamera.enabled?"Enabled":"Disabled"} disabled helperText="Enabling or disabling cameras is not supported by the server yet."/>
       </DialogContent><DialogActions><Button disabled={busy} onClick={()=>setDialog("")}>Cancel</Button><Button type="submit" variant="contained" disabled={busy}>Save changes</Button></DialogActions></Box>}
     </Dialog>
     <Dialog open={dialog === "user"} onClose={busy ? undefined : () => setDialog("")} fullWidth maxWidth="sm">
