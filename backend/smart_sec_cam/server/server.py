@@ -305,12 +305,21 @@ UI Endpoints
 """
 
 
-@app.route('/register', defaults={'path': 'register'})
-@app.route('/videos', defaults={'path': 'videos'})
-@app.route('/stream', defaults={'path': 'stream'})
+# Every page of the React website (frontend/smart-sec-cam/src/index.js), so
+# reloading or bookmarking a page serves the app instead of a 404.
+FRONTEND_PAGES = (
+    "register", "videos", "stream", "dashboard", "search", "incidents", "exports",
+    "merge", "status", "admin", "activity", "cloud", "storage",
+)
+
+
 @app.route('/', defaults={'path': ''})
 def serve_react_ui(path):
     return render_template("index.html")
+
+
+for _page in FRONTEND_PAGES:
+    app.add_url_rule('/' + _page, 'serve_react_ui_' + _page, serve_react_ui, defaults={'path': _page})
 
 
 """
