@@ -28,7 +28,7 @@ export default function RealSearchPage(){
   setSearching(true);setError('');setNotice('');setResults([]);setLegacy([]);setSelected(null);setSearched(false);
   try{const from=localToUtcMs(values.date,values.start,DEFAULT_TZ),to=localToUtcMs(values.date,values.end,DEFAULT_TZ);
    if(!(to>from))throw new Error('End time must be after start time.');const camera=cameras.find(c=>c.id===values.camera);if(!camera)throw new Error('Select an assigned camera.');
-   const [all,files]=await Promise.all([listRecordings(token),listLegacyFiles(token)]);
+   const [all,files]=await Promise.all([listRecordings(token),listLegacyFiles(token,'mp4')]); // same format as the catalogue
    const filtered=all.filter(r=>r.camera_id===camera.id);const list=recordingSegments(filtered,from,to);
    setResults(filtered);setLegacy(files.filter(f=>f.startsWith(`${camera.channel_name}__`) && !all.some(r=>r.filename===f)));
    setFromMs(from);setToMs(to);setSearched(true);if(list.length)choose(list[0],false);

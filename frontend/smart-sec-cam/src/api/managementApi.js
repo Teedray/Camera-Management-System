@@ -36,7 +36,7 @@ export const createMerge = (token, body) => request('POST', '/api/v1/merges', to
 export const loadExportJobs = token => optionalFeature('GET', '/api/v1/exports', token);
 export const extendIncident = (token, id, body) => request('POST', `/api/v1/incidents/${encodeURIComponent(id)}/preservation`, token, { body });
 export const patchCamera = (token, id, body) => request('PATCH', `/api/v1/cameras/${encodeURIComponent(id)}`, token, { body });
-export async function listLegacyFiles(token, format = 'webm') {
+export async function listLegacyFiles(token, format = 'mp4') {
   if (USE_MOCK) return [];
   const response = await request('GET', '/api/video/video-list', token, { params: { 'video-format': format } });
   return Array.isArray(response.videos) ? response.videos : [];
