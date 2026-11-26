@@ -138,6 +138,15 @@ class CloudQueue:
         return recording_protected(self.conn, rid)
 
     def tick(self, now=None, limit=100):
+        """Run one pass over due uploads, local cleanup and cloud expiry.
+
+        Network calls (upload, read-back, cloud checksum, delete) run without a
+        database transaction, so the website can keep writing while Drive is slow
+        or unreachable. Each row's decision is re-checked under a short
+        BEGIN IMMEDIATE before its result is recorded: a hold taken meanwhile still
+        protects the recording, and a cloud copy is marked as being removed (state
+        'expired', which playback refuses) before it is deleted.
+        """
         fixed_time = now
         now = now or utc_now()
         if now.tzinfo is None:
@@ -157,54 +166,39 @@ class CloudQueue:
             expired = False
             expiry = (now + CLOUD_RETENTION).isoformat()
             try:
-                # Serialize workers and hold acquisition with the expiry check.
-                # Network calls are bounded by the S3 adapter's timeouts.
-                self.conn.execute('BEGIN IMMEDIATE')
-                row = self.conn.execute('''SELECT u.object_key,u.expires_at,u.state,
-                    u.attempts,v.path,v.size_bytes,u.sha256,u.local_deleted,r.capture_end_utc FROM cloud_uploads u
-                    JOIN recording_variants v USING(recording_id,format)
-                    JOIN recordings r ON r.id=u.recording_id
-                    WHERE u.recording_id=? AND u.format=? AND u.next_attempt<=?''',
-                    (rid, fmt, now.isoformat())).fetchone()
-                if not row or row[2] not in ('pending', 'uploaded', 'expired'):
-                    self.conn.rollback()
+                row = self._row(rid, fmt, now)
+                if row is None:
                     continue
                 key, expiry, state, attempts, relative, size, verified_sha, local_deleted, end = row
                 local_expiry = datetime.fromisoformat(end).astimezone(timezone.utc) + LOCAL_RETENTION
                 expired = datetime.fromisoformat(expiry) <= now
-                protected = self.protected(rid)
                 path = media_file(self.root, relative)
-                # Remove a buffered variant only after confirming its remote
-                # bytes still match the persisted successful upload checksum.
+
+                # 1. Local cleanup: verify both copies first, without holding the lock.
                 if (self.local_cleanup and state == 'uploaded' and not local_deleted
-                        and now >= local_expiry and not protected):
+                        and now >= local_expiry and not self.protected(rid)):
                     if not verified_sha or self.store.sha256(key) != verified_sha:
                         raise CloudCopyUnavailable('Cloud copy could not be verified')
                     if path is not None:
                         with path.open('rb') as local:
                             if digest(local) != verified_sha:
                                 raise LocalCopyUnavailable('Local copy differs from verified upload')
-                        path.unlink()
-                    # WebM is a local compatibility encoding. A verified MP4
-                    # cloud copy preserves the recording when its local pair expires.
-                    if fmt == 'mp4' and self.formats == ('mp4',):
-                        peer = self.conn.execute('''SELECT path FROM recording_variants
-                            WHERE recording_id=? AND format=?''', (rid, 'webm')).fetchone()
-                        peer_path = media_file(self.root, peer[0]) if peer else None
-                        if peer_path is not None:
-                            peer_path.unlink()
-                    self.conn.execute('''UPDATE cloud_uploads SET local_deleted=1
-                        WHERE recording_id=? AND format=?''', (rid, fmt))
-                    local_deleted = True
-                if expired and not protected:
-                    # At thirty days, routine cloud footage expires independently
-                    # of the local buffer. Retry deterministic crash-leftover keys.
+                    if self._remove_local(rid, fmt, row):
+                        local_deleted = True
+
+                # 2. Cloud expiry: claim the removal under the lock, delete outside it.
+                if expired:
                     if self.cleanup:
-                        self.store.delete(key)
-                        self._state(rid, fmt, 'deleted')
+                        if self._claim_cloud_removal(rid, fmt, now):
+                            self.store.delete(key)
+                            self._record(rid, fmt, "state='deleted',last_error=NULL")
+                            continue
                     elif state == 'pending':
-                        self._state(rid, fmt, 'expired')
-                elif state in ('pending', 'expired'):
+                        self._record(rid, fmt, "state='expired',last_error=NULL", only_if_unprotected=True)
+                        state = 'expired' if not self.protected(rid) else state
+
+                # 3. Upload (also an expired recording still protected by a hold or incident).
+                if state in ('pending', 'expired') and not (expired and not self.protected(rid)):
                     if path is None or path.stat().st_size != size:
                         raise ValueError('Completed local variant is missing or changed')
                     with path.open('rb') as source:
@@ -213,21 +207,18 @@ class CloudQueue:
                         self.store.upload(key, source, size, fmt)
                     if self.store.sha256(key) != sha:
                         raise ValueError('Cloud read-back checksum mismatch')
-                    self.conn.execute('''UPDATE cloud_uploads SET state='uploaded',
-                        sha256=?,last_error=NULL WHERE recording_id=? AND format=?''',
-                        (sha, rid, fmt))
+                    self._record(rid, fmt, "state='uploaded',sha256=?,last_error=NULL", (sha,))
+
                 # Revisit uploaded rows at the local cutoff before the later
                 # cloud cutoff. A disabled/held cleanup gets another check in a minute.
                 next_check = datetime.fromisoformat(expiry)
                 if not local_deleted:
                     next_check = min(next_check, local_expiry)
                 next_check = max(now + timedelta(minutes=1), next_check)
-                self.conn.execute('''UPDATE cloud_uploads SET next_attempt=?
-                    WHERE recording_id=? AND format=?''',
-                    (next_check.isoformat(), rid, fmt))
-                self.conn.commit()
+                self._record(rid, fmt, 'next_attempt=?', (next_check.isoformat(),))
             except Exception as exc:
-                self.conn.rollback()
+                if self.conn.in_transaction:
+                    self.conn.rollback()
                 # Keep details out of persisted errors: SDK exceptions can contain
                 # endpoints and credentials. Full operational investigation is separate.
                 # Expired deletes retry every minute. Upload retries must not
@@ -242,6 +233,80 @@ class CloudQueue:
                         (retry_at.isoformat(),
                          type(exc).__name__, rid, fmt))
                 logger.warning('Cloud operation pending for %s/%s: %s', rid, fmt, type(exc).__name__)
+
+    def _row(self, rid, fmt, now):
+        """The row's current state, read without a transaction (None if not due)."""
+        row = self.conn.execute('''SELECT u.object_key,u.expires_at,u.state,
+            u.attempts,v.path,v.size_bytes,u.sha256,u.local_deleted,r.capture_end_utc FROM cloud_uploads u
+            JOIN recording_variants v USING(recording_id,format)
+            JOIN recordings r ON r.id=u.recording_id
+            WHERE u.recording_id=? AND u.format=? AND u.next_attempt<=?''',
+            (rid, fmt, now.isoformat())).fetchone()
+        if not row or row[2] not in ('pending', 'uploaded', 'expired'):
+            return None
+        return row
+
+    def _record(self, rid, fmt, assignments, params=(), only_if_unprotected=False):
+        """Apply one short update under BEGIN IMMEDIATE (serialized with hold acquisition)."""
+        self.conn.execute('BEGIN IMMEDIATE')
+        try:
+            if only_if_unprotected and self.protected(rid):
+                self.conn.rollback()
+                return False
+            self.conn.execute('UPDATE cloud_uploads SET ' + assignments +
+                              ' WHERE recording_id=? AND format=?', (*params, rid, fmt))
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def _claim_cloud_removal(self, rid, fmt, now):
+        """Mark an expired, unprotected copy as being removed; playback refuses it from now on."""
+        self.conn.execute('BEGIN IMMEDIATE')
+        try:
+            row = self.conn.execute('SELECT expires_at,state FROM cloud_uploads WHERE recording_id=? AND format=?',
+                                    (rid, fmt)).fetchone()
+            if (not row or row[1] not in ('pending', 'uploaded', 'expired')
+                    or datetime.fromisoformat(row[0]) > now or self.protected(rid)):
+                self.conn.rollback()
+                return False
+            self.conn.execute("UPDATE cloud_uploads SET state='expired' WHERE recording_id=? AND format=?",
+                              (rid, fmt))
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def _remove_local(self, rid, fmt, row):
+        """Delete the verified local pair if nothing protected it meanwhile."""
+        self.conn.execute('BEGIN IMMEDIATE')
+        try:
+            current = self.conn.execute('''SELECT state,local_deleted,sha256 FROM cloud_uploads
+                WHERE recording_id=? AND format=?''', (rid, fmt)).fetchone()
+            if (not current or current[0] != 'uploaded' or current[1] or current[2] != row[6]
+                    or self.protected(rid)):
+                self.conn.rollback()
+                return False
+            path = media_file(self.root, row[4])
+            if path is not None:
+                path.unlink()
+            # WebM is a local compatibility encoding. A verified MP4
+            # cloud copy preserves the recording when its local pair expires.
+            if fmt == 'mp4' and self.formats == ('mp4',):
+                peer = self.conn.execute('''SELECT path FROM recording_variants
+                    WHERE recording_id=? AND format=?''', (rid, 'webm')).fetchone()
+                peer_path = media_file(self.root, peer[0]) if peer else None
+                if peer_path is not None:
+                    peer_path.unlink()
+            self.conn.execute('''UPDATE cloud_uploads SET local_deleted=1
+                WHERE recording_id=? AND format=?''', (rid, fmt))
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def _state(self, rid, fmt, state):
         self.conn.execute('''UPDATE cloud_uploads SET state=?,last_error=NULL

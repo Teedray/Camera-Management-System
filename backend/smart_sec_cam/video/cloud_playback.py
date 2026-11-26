@@ -1,10 +1,35 @@
 """Authorize cloud footage from the shared catalogue; never return a public URL."""
+import logging
+import sqlite3
 import tempfile
+import time
 from datetime import datetime, timezone
 from uuid import uuid4
 
 from smart_sec_cam.video.catalogue import assigned_variants
 from smart_sec_cam.video.cloud_storage import digest, recording_protected
+
+
+logger = logging.getLogger(__name__)
+
+
+def _delete_hold(conn, recording_id, owner, attempts=20, wait=0.5):
+    """Release a hold, retrying while the database is briefly locked.
+
+    A hold left behind would protect its recording from cleanup for good, and an
+    exception here would replace the caller's real response.
+    """
+    for attempt in range(attempts):
+        try:
+            with conn:
+                conn.execute('DELETE FROM cloud_holds WHERE recording_id=? AND owner=?',
+                             (recording_id, owner))
+            return True
+        except sqlite3.OperationalError:
+            if attempt == attempts - 1:
+                logger.error('Could not release cloud hold %s on %s; release it manually', owner, recording_id)
+                return False
+            time.sleep(wait)
 
 
 def cloud_entry(db, filename, now=None):
@@ -81,8 +106,7 @@ def fetch_cloud_recording(db, user_id, filename, store_factory):
         raise
     finally:
         if held:
-            with db.conn:
-                db.conn.execute('DELETE FROM cloud_holds WHERE recording_id=? AND owner=?', (rid, owner))
+            _delete_hold(db.conn, rid, owner)
         if store is not None and hasattr(store, 'close'):
             store.close()
 
@@ -104,5 +128,4 @@ def acquire_local_job_hold(db, user_id, filename):
 
 def release_job_hold(db, hold):
     if hold:
-        with db.conn:
-            db.conn.execute('DELETE FROM cloud_holds WHERE recording_id=? AND owner=?', hold)
+        _delete_hold(db.conn, *hold)

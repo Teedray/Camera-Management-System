@@ -61,6 +61,72 @@ class CloudTests(unittest.TestCase):
     def local_files(self):
         return list(self.root.glob('catalogue/*/clip.*'))
 
+    def website_writes_during(self, method_name):
+        """Wrap a store method so a second connection (the website) writes while it runs."""
+        website = sqlite3.connect(self.root / 'test.db', timeout=0.1)
+        self.addCleanup(website.close)
+        writes = []
+        original = getattr(self.store, method_name)
+
+        def wrapped(*args, **kwargs):
+            with website:   # raises "database is locked" if the worker holds the write lock
+                website.execute("UPDATE cameras SET location = 'written during network call'")
+            writes.append(method_name)
+            return original(*args, **kwargs)
+        setattr(self.store, method_name, wrapped)
+        return writes
+
+    def test_upload_and_read_back_do_not_hold_the_database_lock(self):
+        uploads = self.website_writes_during('upload')
+        checks = self.website_writes_during('sha256')
+        self.queue.tick(self.now)
+        self.assertEqual(self.states(), ['uploaded', 'uploaded'])
+        self.assertEqual(len(uploads), 2)
+        self.assertEqual(len(checks), 2)
+
+    def test_local_cleanup_and_cloud_delete_do_not_hold_the_database_lock(self):
+        self.queue.local_cleanup = self.queue.cleanup = True
+        self.queue.tick(self.now)
+        checks = self.website_writes_during('sha256')
+        deletes = self.website_writes_during('delete')
+        self.queue.tick(self.now + timedelta(hours=1))
+        self.assertFalse(self.local_files())
+        self.assertTrue(checks)
+        self.queue.tick(self.now + timedelta(days=31))
+        self.assertEqual(len(deletes), 2)
+        self.assertEqual(self.states(), ['deleted', 'deleted'])
+
+    def test_hold_taken_during_the_cloud_check_still_blocks_local_cleanup(self):
+        self.queue.local_cleanup = True
+        self.queue.tick(self.now)
+        original = self.store.sha256
+
+        def hold_then_check(key):
+            self.queue.hold(self.rid, 'incident:arrived-meanwhile')
+            return original(key)
+        self.store.sha256 = hold_then_check
+        self.queue.tick(self.now + timedelta(hours=1))
+        self.assertEqual(len(self.local_files()), 2)
+
+    def test_hold_taken_before_the_removal_claim_keeps_the_cloud_copy(self):
+        self.queue.cleanup = True
+        self.queue.tick(self.now)
+        self.queue.hold(self.rid, 'export:running')
+        self.queue.tick(self.now + timedelta(days=31))
+        self.assertEqual(len(self.store.objects), 2)
+        self.assertEqual(self.states(), ['uploaded', 'uploaded'])
+
+    def test_failed_cloud_delete_is_retried_and_not_served(self):
+        self.queue.cleanup = True
+        self.queue.tick(self.now)
+        self.store.offline = True
+        self.queue.tick(self.now + timedelta(days=31))
+        self.assertEqual(self.states(), ['expired', 'expired'])   # claimed for removal
+        self.store.offline = False
+        self.queue.tick(self.now + timedelta(days=31, minutes=2))
+        self.assertEqual(self.states(), ['deleted', 'deleted'])
+        self.assertFalse(self.store.objects)
+
     def test_cloud_retained_at_one_hour_and_expires_at_thirty_days(self):
         self.queue.cleanup = True
         self.queue.tick(self.now)

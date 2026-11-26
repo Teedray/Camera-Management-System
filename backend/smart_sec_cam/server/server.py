@@ -830,9 +830,13 @@ def list_camera_recordings(camera_id):
     import_completed(auth_db, VIDEO_DIR)
     # Only segments whose files are still present count as recorded footage;
     # deleted or missing files show up as gaps instead.
+    # A recording whose local copy was cleaned up still counts while its verified
+    # cloud copy is available, so it is not reported as a gap.
     segments = [
         segment for segment in camera_segments(auth_db, camera_id, start, end)
-        if "mp4" in segment["paths"] and media_file(VIDEO_DIR, segment["paths"]["mp4"]) is not None
+        if "mp4" in segment["paths"] and (
+            media_file(VIDEO_DIR, segment["paths"]["mp4"]) is not None
+            or cloud_entry(auth_db, segment["files"]["mp4"]) is not None)
     ]
     # Time after "now" is not missing footage yet.
     gaps = find_gaps(segments, start, min(end, now))

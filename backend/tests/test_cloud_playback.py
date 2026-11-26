@@ -75,6 +75,34 @@ class CloudPlaybackTests(AdminApiTestCase):
         response = self.client.get('/api/v1/recordings', headers=self.headers['viewer'])
         self.assertEqual(response.get_json()['data']['items'], [])
 
+    def test_camera_recordings_count_cloud_only_footage_not_as_a_gap(self):
+        capture = self.now - timedelta(hours=2)
+        with self.db.conn:
+            self.db.conn.execute('UPDATE recordings SET capture_start_utc=? WHERE id=?',
+                                 ((capture - timedelta(seconds=30)).isoformat(), self.rid))
+        response = self.client.get(
+            '/api/v1/cameras/camera/recordings?start=' + (capture - timedelta(seconds=30)).isoformat().replace('+00:00', 'Z')
+            + '&end=' + capture.isoformat().replace('+00:00', 'Z'), headers=self.headers['manager'])
+        data = response.get_json()['data']
+        self.assertEqual([s['id'] for s in data['segments']], [self.rid])
+        self.assertEqual(data['gaps'], [])
+
+    def test_hold_release_survives_a_briefly_locked_database(self):
+        import sqlite3, threading
+        from smart_sec_cam.video.cloud_playback import _delete_hold
+        with self.db.conn:
+            self.db.conn.execute("INSERT INTO cloud_holds VALUES (?, 'playback:test')", (self.rid,))
+        db_path = self.db.conn.execute('PRAGMA database_list').fetchone()[2]
+        blocker = sqlite3.connect(db_path, timeout=5, check_same_thread=False)
+        blocker.execute('BEGIN EXCLUSIVE')
+        threading.Timer(1.0, blocker.rollback).start()
+        self.db.conn.execute('PRAGMA busy_timeout = 100')
+        try:
+            self.assertTrue(_delete_hold(self.db.conn, self.rid, 'playback:test', attempts=20, wait=0.2))
+        finally:
+            blocker.close()
+        self.assertEqual(self.db.conn.execute('SELECT COUNT(*) FROM cloud_holds').fetchone()[0], 0)
+
     def test_revoked_or_unassigned_camera_never_downloads_cloud_bytes(self):
         def forbidden(*args):
             raise AssertionError('must not download without camera permission')
