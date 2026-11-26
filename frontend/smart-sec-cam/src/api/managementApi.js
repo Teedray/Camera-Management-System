@@ -24,6 +24,26 @@ export async function loadOverview(token) {
   }
   return optionalFeature('GET', '/api/v1/system/status', token);
 }
+// Connection status and last-frame time of the caller's cameras (GET /api/v1/cameras/status),
+// plus the end of each camera's newest catalogued segment in the last 15 minutes.
+export const RECENT_RECORDING_MINUTES = 15;
+export async function loadCameraHealth(token, now = Date.now()) {
+  const result = await optionalFeature('GET', '/api/v1/cameras/status', token);
+  if (!result.supported) return result;
+  const since = new Date(now - RECENT_RECORDING_MINUTES * 60000).toISOString();
+  const items = await Promise.all((result.data.items || []).map(async camera => {
+    let lastRecording = null;
+    try {
+      const response = await request('GET', `/api/v1/cameras/${encodeURIComponent(camera.id)}/recordings`, token, { params: { start: since } });
+      const ends = (response.data?.segments || []).map(segment => segment.end);
+      lastRecording = ends.length ? ends.reduce((a, b) => (new Date(a) > new Date(b) ? a : b)) : null;
+    } catch (error) {
+      // The connection status is still worth showing without the recording time.
+    }
+    return { ...camera, last_recording: lastRecording };
+  }));
+  return { supported: true, data: { items } };
+}
 export const loadCloud = token => optionalFeature('GET', '/api/v1/cloud/status', token);
 export const connectCloud = (token, body) => request('POST', '/api/v1/cloud/connect', token, { body });
 export const disconnectCloud = token => request('DELETE', '/api/v1/cloud/connection', token);
