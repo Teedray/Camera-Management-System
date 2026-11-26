@@ -14,13 +14,16 @@ def drive_service(token_file):
     from google.auth.transport.requests import Request
     from google_auth_httplib2 import AuthorizedHttp
     from googleapiclient.discovery import build
-    import httplib2
+    from googleapiclient.http import build_http
     credentials = Credentials.from_authorized_user_file(token_file, [SCOPE])
     if not credentials.valid:
         if not credentials.refresh_token:
             raise ValueError('Run drive_auth to authorize the dedicated Drive account')
         credentials.refresh(Request())
-    return build('drive', 'v3', http=AuthorizedHttp(credentials, http=httplib2.Http(timeout=30)),
+    # Drive uses HTTP 308 to acknowledge an intermediate upload chunk.
+    transport = build_http()
+    transport.timeout = 30
+    return build('drive', 'v3', http=AuthorizedHttp(credentials, http=transport),
                  cache_discovery=False)
 
 

@@ -198,6 +198,20 @@ class IncidentApiTest(AdminApiTestCase):
             with self.client.get(path, headers=admin) as response:
                 self.assertEqual(response.status_code, 200)
 
+    def test_preservation_extension_blocks_manual_removal(self):
+        item = self.save().get_json()["data"]
+        url = f"{INCIDENTS_URL}/{item['id']}"
+        admin = self.headers["administrator"]
+        self.db.assign_camera("administrator-id", "front")
+        for days in (0, 4000):
+            self.assertEqual(self.client.post(url + "/preservation", headers=admin,
+                                             json={"extend_days": days}).status_code, 400)
+        response = self.client.post(url + "/preservation", headers=admin, json={"extend_days": 3})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.client.get(url, headers=admin).json["data"]["preserved_until"],
+                         response.json["data"]["preserved_until"])
+        self.assertEqual(self.client.delete(url, headers=admin).status_code, 409)
+
     def test_endpoints_require_authentication(self):
         for method, url in (
             ("post", INCIDENTS_URL), ("get", INCIDENTS_URL),

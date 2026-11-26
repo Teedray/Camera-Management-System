@@ -133,7 +133,14 @@ def main(argv=None):
     db = AuthDatabase.__new__(AuthDatabase)
     db.conn = conn
     root = os.getenv('VIDEO_DIR', 'data/videos')
+    # Serialize worker processes without locking the application database.
+    worker_lock = sqlite3.connect(str(path) + '.worker-lock', timeout=1)
     try:
+        try:
+            worker_lock.execute('BEGIN IMMEDIATE')
+        except sqlite3.OperationalError:
+            logger.error('Could not acquire the cloud worker lock')
+            return 1
         queue = CloudQueue(conn, root, store, cleanup=args.enable_cleanup,
                            local_cleanup=args.enable_local_cleanup)
         while True:
@@ -150,6 +157,7 @@ def main(argv=None):
                     return 1
             time.sleep(60)
     finally:
+        worker_lock.close()
         conn.close()
         if hasattr(store, 'close'):
             store.close()

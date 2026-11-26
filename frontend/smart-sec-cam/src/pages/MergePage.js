@@ -1,3 +1,4 @@
+import { downloadOutput } from '../api/managementApi';
 import React from 'react';
 import { Alert, Box, Button, Checkbox, Chip, FormControlLabel, LinearProgress, MenuItem, Paper, TextField, Typography } from '@mui/material';
 import Layout from '../components/Layout';import { FeaturePanel, NotConnected, RetryError } from '../components/FeaturePanel';
@@ -14,7 +15,7 @@ export default function MergePage(){
  React.useEffect(()=>{if(ready&&allowed)load();},[ready,allowed,load]);
  const checked=new Set(selected);const shown=recordings.filter(r=>!cameraFilter||r.camera_id===cameraFilter);
  function toggle(filename){setSelected(v=>v.includes(filename)?v.filter(n=>n!==filename):[...v,filename]);}
- async function submit(e){e.preventDefault();setError('');setNotice('');if(selected.length<2){setError('Select at least two available recordings.');return;}setBusy(true);try{await createMerge(token,{title:title.trim()||'Merged recording',filenames:selected});setNotice('Merge job accepted by backend.');setSelected([]);await load();}catch(e){setError(explainUnsupported(e,'Merge operation'));}finally{setBusy(false);}}
+ async function submit(e){e.preventDefault();setError('');setNotice('');if(selected.length<2){setError('Select at least two available recordings.');return;}setBusy(true);try{await createMerge(token,{title:title.trim()||'Merged recording',filenames:selected});setNotice('Merged recording is ready.');setSelected([]);await load();}catch(e){setError(explainUnsupported(e,'Merge operation'));}finally{setBusy(false);}}
  if(!ready)return null;
  return <Layout token={token}><Typography variant="h5" component="h1" sx={{mb:1}}>Merge recordings</Typography><Typography variant="body2" color="text.secondary" sx={{mb:2}}>Select permitted recordings, submit a merge, and monitor the output</Typography>
  {!me?<LinearProgress/>:!allowed?<Alert severity="warning">Only managers and administrators may merge recordings.</Alert>:<>
@@ -34,7 +35,7 @@ export default function MergePage(){
   </FeaturePanel>
   </Box>
   <FeaturePanel title="Merge jobs and completed outputs" detail="Queued, processing, completed and failed jobs; source camera and time metadata">
-   {(jobs?.data?.items||[]).length===0?<Alert severity="info">No completed merge jobs available.</Alert>:(jobs.data.items).map(j=><Paper key={j.id} variant="outlined" sx={{p:2,mb:1}}><Box sx={{display:'flex',justifyContent:'space-between',gap:1}}><Typography fontWeight={600}>{j.title||j.id}</Typography><Chip color={j.status==='failed'?'error':j.status==='completed'?'success':'default'} label={j.status||'unknown'}/></Box><Typography variant="body2" color="text.secondary">Sources: {(j.source_cameras||[]).join(', ')||'Not reported'} · {j.start||'Time unknown'} – {j.end||'Time unknown'}</Typography>{j.status==='failed'&&<Alert severity="error">{j.error||'Merge failed.'}</Alert>}{j.download_url&&j.status==='completed'&&<Button component="a" href={j.download_url} size="small">Open output</Button>}</Paper>)}
+   {(jobs?.data?.items||[]).length===0?<Alert severity="info">No completed merge jobs available.</Alert>:(jobs.data.items).map(j=><Paper key={j.id} variant="outlined" sx={{p:2,mb:1}}><Box sx={{display:'flex',justifyContent:'space-between',gap:1}}><Typography fontWeight={600}>{j.title||j.id}</Typography><Chip color={j.status==='failed'?'error':j.status==='completed'?'success':'default'} label={j.status||'unknown'}/></Box><Typography variant="body2" color="text.secondary">Sources: {(j.source_cameras||[]).join(', ')||'Not reported'} · {j.start||'Time unknown'} – {j.end||'Time unknown'}</Typography>{j.status==='failed'&&<Alert severity="error">{j.error||'Merge failed.'}</Alert>}{j.download_url&&j.status==='completed'&&<Button onClick={()=>downloadOutput(token,j).catch(e=>setError(e.message))} size="small">Open output</Button>}</Paper>)}
   </FeaturePanel>
  </>}
  </Layout>;

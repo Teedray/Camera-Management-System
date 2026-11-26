@@ -126,6 +126,34 @@ class CloudTests(unittest.TestCase):
         self.queue.tick(self.now + timedelta(days=31, minutes=2))
         self.assertEqual(self.states(), ['deleted', 'deleted'])
         self.assertFalse(self.store.objects)
+    def test_dashboard_write_during_drive_verification(self):
+        checksum = self.store.sha256
+        other = sqlite3.connect(self.root / 'test.db', timeout=0)
+        self.addCleanup(other.close)
+
+        def verify(key):
+            with other:
+                other.execute("UPDATE operation_settings SET paused=paused")
+            return checksum(key)
+
+        self.store.sha256 = verify
+        self.queue.local_cleanup = True
+        self.queue.tick(self.now)
+        self.assertEqual(self.states(), ['uploaded', 'uploaded'])
+        self.queue.tick(self.now + timedelta(hours=1))
+        self.assertEqual(self.local_files(), [])
+
+    def test_worker_obeys_shared_pause_and_retention_settings(self):
+        with self.db.conn:
+            self.db.conn.execute("UPDATE operation_settings SET paused=1,cloud_days=8")
+        self.queue.tick(self.now)
+        self.assertEqual(self.states(), [])
+        with self.db.conn:
+            self.db.conn.execute("UPDATE operation_settings SET paused=0")
+        self.queue.tick(self.now)
+        expiry, verified = self.db.conn.execute("SELECT expires_at,verified_at FROM cloud_uploads LIMIT 1").fetchone()
+        self.assertEqual(datetime.fromisoformat(expiry), self.now + timedelta(days=8))
+        self.assertEqual(datetime.fromisoformat(verified), self.now)
 
     def test_cloud_retained_at_one_hour_and_expires_at_thirty_days(self):
         self.queue.cleanup = True

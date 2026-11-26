@@ -50,3 +50,12 @@ describe("Login (real server)", () => {
     expect(await screen.findByText(/Could not reach the server/)).toBeInTheDocument();
   });
 });
+
+test("legacy viewer can submit an empty username with its password", async () => {
+  server({ login: { status: "OK", token: "legacy-token" } });
+  show();
+  await userEvent.type(screen.getByLabelText(/^Password/), "secret");
+  await userEvent.click(screen.getByRole("button", { name: "Login" }));
+  expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("/api/auth/login"),
+    expect.objectContaining({body: JSON.stringify({username: "", password: "secret"})}));
+});

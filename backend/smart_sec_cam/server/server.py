@@ -1,3 +1,4 @@
+import sys
 import base64
 import ipaddress
 import json
@@ -25,6 +26,8 @@ from flask import (
 from flask_cors import CORS
 from flask_socketio import SocketIO, join_room
 
+from smart_sec_cam.server.management import register as register_management
+from smart_sec_cam.video import operations
 from smart_sec_cam.auth.authentication import Authenticator
 from smart_sec_cam.auth.database import AuthDatabase, LastAdministratorError
 from smart_sec_cam.auth.models import User
@@ -172,7 +175,9 @@ def incident_manager():
 
 
 def incident_profile(incident):
+    hold = auth_db.conn.execute("SELECT until_utc FROM incident_preservation WHERE incident_id=?", (incident["id"],)).fetchone()
     return {
+        "preserved_until": hold[0] if hold else None,
         "id": incident["id"],
         "camera": incident["camera"],
         "start_time": incident["start_time"],
@@ -916,27 +921,53 @@ def download_export():
     if not 0 <= start < end < float("inf"):
         return jsonify(error="The end time must be greater than the start time"), 400
 
-    source = resolve_recording(g.current_user.user_id, filename)
-    if source is None:
-        return jsonify(error="Recording unavailable"), 404
-
-    workspace = TemporaryDirectory(prefix="camera-export-")
-    output = Path(workspace.name) / "clip.mp4"
+    uid = g.current_user.user_id
+    hold = acquire_local_job_hold(auth_db, uid, filename)
+    job = None
+    output = None
     try:
-        tpool.execute(export_clip, source, output, start, end)
-        response = send_file(output, mimetype="video/mp4", as_attachment=True, conditional=False)
-    except InvalidClipRange as error:
-        workspace.cleanup()
-        return jsonify(error=str(error)), 400
-    except Exception:
-        workspace.cleanup()
+        with TemporaryDirectory(prefix='camera-export-') as workspace:
+            source = resolve_recording(uid, filename)
+            if source is None:
+                remote = fetch_cloud_recording(auth_db, uid, filename, lambda: configured_store(os.environ))
+                if remote is None:
+                    return jsonify(error="Recording unavailable"), 404
+                source = Path(workspace) / filename
+                with remote[0] as src, source.open("wb") as dest:
+                    shutil.copyfileobj(src, dest)
+            row = auth_db.conn.execute("""SELECT camera_id FROM recordings r
+                JOIN recording_variants v ON r.id=v.recording_id WHERE v.filename=?""",(filename,)).fetchone()
+            if row:
+                camera_id = row[0]
+            else:
+                channel = recording_details(filename)[0]
+                camera_id = next(c["id"] for c in auth_db.get_user_cameras(uid) if c["channel_name"] == channel)
+            title = f"{Path(filename).stem}_{start}-{end}.mp4"
+            root = Path(VIDEO_DIR) / ".outputs"
+            root.mkdir(parents=True, exist_ok=True)
+            job = operations.new_job(auth_db.conn,"exports",uid,title,[camera_id])
+            output = root / (job + ".mp4")
+            tpool.execute(export_clip, source, output, start, end)
+            if not has_incident_role(uid) or not auth_db.can_access_camera(uid, camera_id):
+                raise PermissionError()
+            response = send_file(output.resolve(), mimetype="video/mp4", as_attachment=True,
+                                 download_name=title, conditional=False)
+            operations.finish(auth_db.conn,job,"ready")
+            response.headers["Cache-Control"] = "no-store"
+            return response
+    except Exception as exc:
+        if output:
+            output.unlink(missing_ok=True)
+        if job:
+            operations.finish(auth_db.conn,job,"failed")
+        if isinstance(exc, InvalidClipRange):
+            return jsonify(error=str(exc)), 400
+        if isinstance(exc, PermissionError):
+            return jsonify(error="Recording unavailable"), 404
         app.logger.exception("Recording export failed")
         return jsonify(error="Could not export the selected clip"), 500
-
-    response.headers["Cache-Control"] = "no-store"
-    response.direct_passthrough = False
-    response.call_on_close(workspace.cleanup)
-    return response
+    finally:
+        release_job_hold(auth_db, hold)
 
 
 @app.route("/api/v1/incidents", methods=["POST"])
@@ -1060,6 +1091,10 @@ def delete_incident(incident_id):
     if incident is None:
         return jsonify(success=False, error="Incident does not exist"), 404
 
+    hold = auth_db.conn.execute("SELECT until_utc FROM incident_preservation WHERE incident_id=?",
+                                (incident_id,)).fetchone()
+    if hold and datetime.fromisoformat(hold[0]) > utc_now():
+        return jsonify(success=False,error="Incident is under an active preservation hold"), 409
     filename = incident["filename"]
     if not filename or Path(filename).name != filename or filename in (".", ".."):
         return jsonify(success=False, error="Invalid archive filename"), 409
@@ -1073,6 +1108,7 @@ def delete_incident(incident_id):
             ).rowcount
             if not removed:
                 return jsonify(success=False, error="Incident does not exist"), 404
+            conn.execute("DELETE FROM incident_preservation WHERE incident_id=?", (incident_id,))
             shared = conn.execute(
                 "SELECT 1 FROM incident_clips WHERE filename = ? LIMIT 1", (filename,)
             ).fetchone()
@@ -1180,8 +1216,11 @@ def listen_for_images(redis_url: str, redis_port: int):
 def register_completed_recordings():
     while True:
         import_completed(auth_db, VIDEO_DIR)
+        operations.expire_outputs(auth_db.conn, Path(VIDEO_DIR)/".outputs", utc_now().isoformat())
         socketio.sleep(5)
 
+
+register_management(sys.modules[__name__])
 
 if __name__ == '__main__':
     import argparse

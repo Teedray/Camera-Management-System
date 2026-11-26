@@ -3,6 +3,7 @@ import sqlite3
 from typing import List
 
 from smart_sec_cam.auth.models import User
+from smart_sec_cam.video.operations import setup as setup_operations
 
 
 class LastAdministratorError(ValueError):
@@ -120,6 +121,8 @@ class AuthDatabase:
             cursor.execute("ALTER TABLE cameras ADD COLUMN last_seen_utc TEXT")
 
         self.conn.commit()
+
+        setup_operations(self.conn)
 
     CAMERA_STATUS_FIELDS = (
         "id", "name", "location", "channel_name", "enabled",

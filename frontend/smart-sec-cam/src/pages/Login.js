@@ -118,7 +118,7 @@ export default function Login(props) {
     function handleLogin() {
         if (busy) return;
         setError("");
-        if (!username.trim() || !password) {
+        if ((USE_MOCK && !username.trim()) || !password) {
             setError("Enter your username and password.");
             return;
         }
@@ -180,7 +180,7 @@ export default function Login(props) {
             <Typography component="h1" variant="h4" sx={{fontWeight:800,letterSpacing:'-.05em',mt:1,mb:.8}}>Welcome back</Typography>
             <Typography color="text.secondary" sx={{fontSize:14,mb:4}}>Sign in to your security workspace</Typography>
             <Box component="form" noValidate onSubmit={event => {event.preventDefault(); handleLogin();}} sx={{display:'grid',gap:2}}>
-              <TextField required fullWidth id="username" label="Username" autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} />
+              <TextField required={USE_MOCK} fullWidth id="username" label="Username" autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} />
               <TextField required fullWidth id="password" label="Password" type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} />
               <Button fullWidth variant="contained" size="large" type="submit" disabled={busy} sx={{mt:1,py:1.4}}>{busy ? "Signing in…" : "Login"}</Button>
               {error && <Alert severity="error">{error}</Alert>}

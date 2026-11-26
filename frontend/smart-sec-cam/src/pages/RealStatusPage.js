@@ -8,7 +8,7 @@ const CONNECTION_LABELS={connected:'Connected',disconnected:'Disconnected',never
 export default function RealStatusPage(){
  const {token,ready}=useAuth(),me=useMe(ready?token:null);
  const [state,setState]=React.useState(null),[busy,setBusy]=React.useState(false),[error,setError]=React.useState('');
- const load=React.useCallback(async()=>{setBusy(true);setError('');try{const [cameras,overview,cloud,storage,health]=await Promise.all([fetchCameras(token),loadOverview(token),loadCloud(token),loadStorage(token),loadCameraHealth(token)]);setState({cameras,overview,cloud,storage,health});}catch(e){setError(e.message);}finally{setBusy(false);}},[token]);
+ const load=React.useCallback(async()=>{setBusy(true);setError('');try{const [cameras,overview,cloud,storage,health]=await Promise.all([fetchCameras(token),loadOverview(token),me?.role==="administrator"?loadCloud(token):null,me?.role==="administrator"?loadStorage(token):null,loadCameraHealth(token)]);setState({cameras,overview,cloud,storage,health});}catch(e){setError(e.message);}finally{setBusy(false);}},[token,me?.role]);
  React.useEffect(()=>{if(!ready)return undefined;load();const id=setInterval(load,30000);return()=>clearInterval(id);},[ready,load]);
  if(!ready)return null;
  const overall=state?.overview?.data||{},cloud=state?.cloud?.data||{},storage=state?.storage?.data||{};
@@ -19,12 +19,12 @@ export default function RealStatusPage(){
   <FeaturePanel title="Cameras and recording health">
    {!state?.overview?.supported&&!state?.health?.supported&&<NotConnected name="Live connectivity and recording telemetry"/>}
    {(state?.cameras||[]).map(c=>{const h=(overall.cameras||[]).find(x=>x.id===c.id||x.name===c.name);const live=(state?.health?.data?.items||[]).find(x=>x.id===c.id);
-    const connection=h?.connection||CONNECTION_LABELS[live?.status]||'Connectivity unknown';const lastRecording=h?.last_recording||live?.last_recording;
+    const connection=h?.connection||CONNECTION_LABELS[live?.status]||'Connectivity unknown';const lastRecording=h?.last_recording||live?.last_recording;const lastFrame=h?.last_seen||live?.last_seen_utc;
     return <Paper variant="outlined" key={c.id} aria-label={c.name} sx={{p:1.5,mb:1,display:'flex',alignItems:'center',justifyContent:'space-between',gap:1,flexWrap:'wrap'}}><Box><Typography fontWeight={600}>{c.name}</Typography><Typography variant="caption" color="text.secondary">{c.location||c.channel_name}</Typography></Box><Box><Chip size="small" color={live?.status==='connected'?'success':live?.status?'error':'default'} label={connection}/>{h?.recording_state&&<Chip sx={{ml:1}} size="small" label={h.recording_state}/>}
-     <Typography variant="caption" color="text.secondary" display="block">Last frame: {live?.last_seen_utc?formatDateTime(live.last_seen_utc,DEFAULT_TZ):'Not reported'}</Typography>
+     <Typography variant="caption" color="text.secondary" display="block">Last frame: {lastFrame?formatDateTime(lastFrame,DEFAULT_TZ):'Not reported'}</Typography>
      <Typography variant="caption" color="text.secondary" display="block">Last recording: {lastRecording?formatDateTime(lastRecording,DEFAULT_TZ):live?`None in the last ${RECENT_RECORDING_MINUTES} minutes`:'Not reported'}</Typography></Box></Paper>;})}
   </FeaturePanel>
-  <FeaturePanel title="Cloud upload and backup health"><Typography>Connection: {cloud.connection_status||'Unknown'} · Pending uploads: {cloud.pending_uploads??'Unknown'} · Failed uploads: {cloud.failed_uploads??'Unknown'}</Typography><Typography>Last verified upload: {cloud.last_verified?formatDateTime(cloud.last_verified,DEFAULT_TZ):'Not reported'}</Typography>{cloud.last_error&&<Alert severity="error">{cloud.last_error}</Alert>}{!state?.cloud?.supported&&<NotConnected name="Cloud upload and backup telemetry"/>}</FeaturePanel>
-  <FeaturePanel title="Storage and retention health"><Typography>Used: {storage.used_bytes!=null?formatBytes(storage.used_bytes):'Unknown'} · Free: {storage.free_bytes!=null?formatBytes(storage.free_bytes):'Unknown'}</Typography><Typography>Retention: {storage.retention_days??'Unknown'} days</Typography>{!state?.storage?.supported&&<NotConnected name="Storage telemetry"/>}</FeaturePanel>
+  {me?.role==="administrator"&&<><FeaturePanel title="Cloud upload and backup health"><Typography>Connection: {cloud.connection_status||'Unknown'} · Pending uploads: {cloud.pending_uploads??'Unknown'} · Failed uploads: {cloud.failed_uploads??'Unknown'}</Typography><Typography>Last verified upload: {cloud.last_verified?formatDateTime(cloud.last_verified,DEFAULT_TZ):'Not reported'}</Typography>{cloud.last_error&&<Alert severity="error">{cloud.last_error}</Alert>}{!state?.cloud?.supported&&<NotConnected name="Cloud upload and backup telemetry"/>}</FeaturePanel>
+  <FeaturePanel title="Storage and retention health"><Typography>Used: {storage.used_bytes!=null?formatBytes(storage.used_bytes):'Unknown'} · Free: {storage.free_bytes!=null?formatBytes(storage.free_bytes):'Unknown'}</Typography><Typography>Retention: {storage.retention_days??'Unknown'} days</Typography>{!state?.storage?.supported&&<NotConnected name="Storage telemetry"/>}</FeaturePanel></>}
  </Layout>;
 }

@@ -23,7 +23,7 @@ export default function DashboardPage() {
     if (!token) return;
     setBusy(true);setError('');
     const [cameras, recordings, incidents, health, cloud, storage, rooms] = await Promise.allSettled([
-      fetchCameras(token), listRecordings(token), listIncidents(token), loadOverview(token), loadCloud(token), loadStorage(token),
+      fetchCameras(token), listRecordings(token), listIncidents(token), loadOverview(token), me?.role==="administrator"?loadCloud(token):null, me?.role==="administrator"?loadStorage(token):null,
       USE_MOCK ? Promise.resolve({rooms:{}}) : request('GET','/api/video/rooms',token)
     ]);
     const val = v => v.status === 'fulfilled' ? v.value : null;
@@ -32,7 +32,7 @@ export default function DashboardPage() {
     setData({cameras:val(cameras)||[],recordings:val(recordings)||[],incidents:val(incidents)||[],
       health:val(health),cloud:val(cloud),storage:val(storage),rooms:val(rooms)?.rooms||{}});
     setBusy(false);
-  },[token]);
+  },[token,me?.role]);
   React.useEffect(()=>{if(!ready)return undefined;refresh();const id=setInterval(refresh,45000);return()=>clearInterval(id);},[ready,refresh]);
   if (!ready) return null;
   const feedNames = Object.keys(data?.rooms||{});
@@ -56,14 +56,14 @@ export default function DashboardPage() {
       <FeaturePanel title="Assigned camera overview" action={<Button onClick={()=>navigate('/stream')}>Live view</Button>}>
         {!data?.cameras?.length ? <Alert severity="info">No assigned cameras were returned.</Alert> : data.cameras.map(c=><Paper key={c.id} variant="outlined" sx={{p:1.5,mb:1,display:'flex',justifyContent:'space-between',alignItems:'center',gap:2}}>
           <Box><Typography fontWeight={600}>{c.name}</Typography><Typography variant="caption" color="text.secondary">{c.location || c.channel_name}</Typography></Box>
-          <Box sx={{textAlign:'right'}}><Chip size="small" color={streamVisible(c)?'success':'default'} label={streamVisible(c)?'Stream announced':'Stream unconfirmed'}/><Typography display="block" variant="caption" color="text.secondary">Recording state: unknown</Typography></Box>
+          <Box sx={{textAlign:'right'}}><Chip size="small" color={streamVisible(c)?'success':'default'} label={streamVisible(c)?'Stream announced':'Stream unconfirmed'}/><Typography display="block" variant="caption" color="text.secondary">{data?.health?.data?.cameras?.find(h=>h.id===c.id)?.recording_state||"No recording status"}</Typography></Box>
         </Paper>)}
       </FeaturePanel>
-      <FeaturePanel title="Cloud and storage" action={<Button onClick={()=>navigate('/cloud')}>Cloud setup</Button>}>
+      {me?.role==="administrator"&&<FeaturePanel title="Cloud and storage" action={<Button onClick={()=>navigate('/cloud')}>Cloud setup</Button>}>
         {cloud ? <Typography>Cloud: {cloud.connection_status || cloud.status || 'Unknown'} · Pending uploads: {cloud.pending_uploads ?? 'Unknown'} · Failed jobs: {cloud.failed_uploads ?? 'Unknown'}</Typography> : <NotConnected name="Cloud connection / upload jobs"/>}
         {storage ? <Typography sx={{mt:2}}>Storage: {storage.used_bytes != null ? `${storage.used_bytes} bytes used` : 'Unknown'} · Capacity: {storage.total_bytes ?? 'Unknown'} bytes</Typography> : <NotConnected name="Disk usage and retention"/>}
         <Button sx={{mt:2}} onClick={()=>navigate('/storage')}>Storage & retention settings</Button>
-      </FeaturePanel>
+      </FeaturePanel>}
     </Box>
     <FeaturePanel title="Recent recordings" action={<Button onClick={()=>navigate('/search')}>Search all footage</Button>}>
       {data?.recordings?.length ? data.recordings.slice(0,5).map(r=><Paper key={r.filename} variant="outlined" sx={{mb:1,p:1.5}}><Typography fontWeight={600}>{r.camera_name}</Typography><Typography variant="body2" color="text.secondary">{r.start ? formatDateTime(r.start,DEFAULT_TZ) : 'Time unknown'} · {r.filename}</Typography></Paper>) : <Typography color="text.secondary">No timestamped recordings available yet.</Typography>}

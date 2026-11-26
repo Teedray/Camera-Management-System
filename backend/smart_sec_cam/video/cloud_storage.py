@@ -47,6 +47,8 @@ class CloudQueue:
         self.setup()
 
     def setup(self):
+        from smart_sec_cam.video.operations import setup
+        setup(self.conn)
         self.conn.executescript('''
             CREATE TABLE IF NOT EXISTS cloud_uploads (
                 recording_id TEXT NOT NULL,
@@ -73,6 +75,8 @@ class CloudQueue:
         ''')
         columns = {row[1] for row in self.conn.execute('PRAGMA table_info(cloud_uploads)')}
         with self.conn:
+            if 'verified_at' not in columns:
+                self.conn.execute('ALTER TABLE cloud_uploads ADD COLUMN verified_at TEXT')
             if 'local_deleted' not in columns:
                 self.conn.execute('ALTER TABLE cloud_uploads ADD COLUMN local_deleted INTEGER NOT NULL DEFAULT 0')
             self.conn.execute('CREATE TABLE IF NOT EXISTS cloud_policy (name TEXT PRIMARY KEY)')
@@ -116,6 +120,7 @@ class CloudQueue:
 
     def discover(self, now):
         with self.conn:
+            days, = self.conn.execute("SELECT cloud_days FROM operation_settings").fetchone()
             for rid, fmt, end in self.conn.execute('''
                 SELECT v.recording_id, v.format, r.capture_end_utc
                 FROM recording_variants v JOIN recordings r ON r.id=v.recording_id
@@ -127,7 +132,7 @@ class CloudQueue:
                 captured = datetime.fromisoformat(end)
                 if captured.tzinfo is None:
                     raise ValueError('Capture time must include timezone')
-                expires = captured.astimezone(timezone.utc) + CLOUD_RETENTION
+                expires = captured.astimezone(timezone.utc) + timedelta(days=days)
                 self.conn.execute('''INSERT OR IGNORE INTO cloud_uploads
                     (recording_id,format,object_key,expires_at,next_attempt)
                     VALUES (?,?,?,?,?)''',
@@ -152,6 +157,11 @@ class CloudQueue:
         if now.tzinfo is None:
             raise ValueError('Worker time must include timezone')
         now = now.astimezone(timezone.utc)
+        with self.conn:
+            self.conn.execute("UPDATE operation_settings SET worker_seen=?,local_cleanup=?,cloud_cleanup=? WHERE id=1",
+                              (now.isoformat(),self.local_cleanup,self.cleanup))
+        if self.conn.execute("SELECT paused FROM operation_settings").fetchone()[0]:
+            return
         self.discover(now)
         placeholders = ','.join('?' for _ in self.formats)
         rows = self.conn.execute('''SELECT recording_id,format FROM cloud_uploads
@@ -166,6 +176,8 @@ class CloudQueue:
             expired = False
             expiry = (now + CLOUD_RETENTION).isoformat()
             try:
+                if self.conn.execute("SELECT paused FROM operation_settings").fetchone()[0]:
+                    break
                 row = self._row(rid, fmt, now)
                 if row is None:
                     continue
@@ -207,7 +219,7 @@ class CloudQueue:
                         self.store.upload(key, source, size, fmt)
                     if self.store.sha256(key) != sha:
                         raise ValueError('Cloud read-back checksum mismatch')
-                    self._record(rid, fmt, "state='uploaded',sha256=?,last_error=NULL", (sha,))
+                    self._record(rid, fmt, "state='uploaded',sha256=?,last_error=NULL,verified_at=?", (sha, now.isoformat()))
 
                 # Revisit uploaded rows at the local cutoff before the later
                 # cloud cutoff. A disabled/held cleanup gets another check in a minute.
@@ -267,6 +279,9 @@ class CloudQueue:
         try:
             row = self.conn.execute('SELECT expires_at,state FROM cloud_uploads WHERE recording_id=? AND format=?',
                                     (rid, fmt)).fetchone()
+            if self.conn.execute("SELECT paused FROM operation_settings").fetchone()[0]:
+                self.conn.rollback()
+                return False
             if (not row or row[1] not in ('pending', 'uploaded', 'expired')
                     or datetime.fromisoformat(row[0]) > now or self.protected(rid)):
                 self.conn.rollback()
@@ -285,6 +300,9 @@ class CloudQueue:
         try:
             current = self.conn.execute('''SELECT state,local_deleted,sha256 FROM cloud_uploads
                 WHERE recording_id=? AND format=?''', (rid, fmt)).fetchone()
+            if self.conn.execute("SELECT paused FROM operation_settings").fetchone()[0]:
+                self.conn.rollback()
+                return False
             if (not current or current[0] != 'uploaded' or current[1] or current[2] != row[6]
                     or self.protected(rid)):
                 self.conn.rollback()
@@ -370,6 +388,8 @@ def queue_status(conn, now=None):
     result = {'queue_ready': ready, 'states': states, 'failed': 0,
               'due': 0, 'overdue': 0, 'holds': 0, 'verified_recent': 0,
               'local_removed': 0, 'local_retention_hours': 1, 'cloud_retention_days': 30}
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='operation_settings'").fetchone():
+        result["cloud_retention_days"] = conn.execute("SELECT cloud_days FROM operation_settings").fetchone()[0]
     if not ready:
         return result
     states.update(dict(conn.execute('SELECT state,COUNT(*) FROM cloud_uploads GROUP BY state')))

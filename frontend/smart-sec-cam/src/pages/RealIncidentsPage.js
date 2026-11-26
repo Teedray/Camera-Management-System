@@ -25,7 +25,7 @@ export default function RealIncidentsPage(){
     <Box sx={{display:'flex',gap:1,justifyContent:'space-between',alignItems:'center',flexWrap:'wrap'}}><Typography fontWeight={700}>{i.title||i.id}</Typography><Box sx={{display:'flex',gap:.5}}><Chip color="success" size="small" label={i.status||'Ready'}/><Chip size="small" color="primary" label={i.incident_flag||i.protected?'Protected archive':'Protection unknown'}/></Box></Box>
     <Typography variant="body2" color="text.secondary">Camera: {i.camera||'Unknown'} · Created: {i.created_at?formatDateTime(i.created_at,DEFAULT_TZ):'Unknown'}</Typography>
     <Typography variant="body2" color="text.secondary">Source range: {i.start_time}–{i.end_time} seconds · Saved by: {i.created_by||'Not reported'}</Typography>
-    {i.notes&&<Typography variant="body2" sx={{my:1}}>{i.notes}</Typography>}
+    {i.preserved_until&&<Typography>Protected through {formatDateTime(i.preserved_until,DEFAULT_TZ)}</Typography>}{i.notes&&<Typography variant="body2" sx={{my:1}}>{i.notes}</Typography>}
     <Box sx={{display:'flex',gap:1,mt:1,flexWrap:'wrap'}}><Button size="small" variant="outlined" onClick={()=>{setSelected(i);setVideoError('');}}>Open clip</Button>{admin&&<><Button size="small" onClick={()=>setPreserveTarget(i)}>Extend preservation</Button><Button color="error" size="small" onClick={()=>setDeleteTarget(i)}>Delete…</Button></>}</Box>
    </Paper>)}</Box>
   </FeaturePanel>
@@ -33,7 +33,7 @@ export default function RealIncidentsPage(){
     <Box component="video" key={selected.id} src={incidentStreamUrl(selected.id,token)} controls playsInline preload="metadata" onError={()=>setVideoError('The archived recording is unavailable or your camera access was revoked.')} sx={{width:'100%',maxWidth:1000,aspectRatio:'16/9',bgcolor:'#000',borderRadius:1}}/>
     {videoError&&<Alert severity="error" sx={{mt:1}}>{videoError}</Alert>}
   </FeaturePanel>}
-  <Alert severity="info">Saved incident clips are kept in a separate protected archive. Preservation extensions are currently unavailable.</Alert>
+  <Alert severity="info">Saved incident clips are kept in a separate protected archive. A preservation extension blocks manual deletion until the hold ends.</Alert>
   <Dialog open={Boolean(deleteTarget)} onClose={busy?undefined:()=>setDeleteTarget(null)}><DialogTitle>Delete protected incident?</DialogTitle><DialogContent><Typography>The clip “{deleteTarget?.title}” will be permanently removed from the archive. This cannot be undone.</Typography></DialogContent><DialogActions><Button disabled={busy} onClick={()=>setDeleteTarget(null)}>Cancel</Button><Button color="error" variant="contained" disabled={busy} onClick={remove}>Confirm delete</Button></DialogActions></Dialog>
   <Dialog open={Boolean(preserveTarget)} onClose={busy?undefined:()=>setPreserveTarget(null)}><DialogTitle>Extend clip preservation</DialogTitle><DialogContent><TextField fullWidth type="number" label="Extend by days" value={days} onChange={e=>setDays(e.target.value)} inputProps={{min:1,max:3650}} sx={{mt:1}}/></DialogContent><DialogActions><Button disabled={busy} onClick={()=>setPreserveTarget(null)}>Cancel</Button><Button variant="contained" disabled={busy} onClick={extend}>Confirm extension</Button></DialogActions></Dialog>
  </Layout>;

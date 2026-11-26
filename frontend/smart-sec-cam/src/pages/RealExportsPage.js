@@ -1,3 +1,4 @@
+import { downloadOutput } from '../api/managementApi';
 import React from 'react';
 import { Alert, Box, Button, Chip, LinearProgress, Paper, Typography } from '@mui/material';
 import { useNavigate } from 'react-router-dom';
@@ -19,7 +20,7 @@ export default function RealExportsPage(){
   <FeaturePanel title="Export queue / server job history" detail="Queued, processing, ready, failed, expiry and download availability">
    {!jobs?.supported&&<NotConnected name="Server export queue" detail="This backend returns the MP4 directly in response to a POST. It cannot provide job expiry or persistent re-download without a jobs API."/>}
    {jobs?.supported&&serverJobs.length===0&&<Alert severity="info">No server export jobs.</Alert>}
-   {serverJobs.map(j=><Paper key={j.id} variant="outlined" sx={{p:2,mb:1}}><Box sx={{display:'flex',gap:1,justifyContent:'space-between',flexWrap:'wrap'}}><Typography fontWeight={700}>{j.filename||j.id}</Typography><Chip color={j.status==='failed'?'error':j.status==='ready'?'success':'default'} label={j.status||'unknown'}/></Box><Typography variant="body2" color="text.secondary">Created: {j.created_at?formatDateTime(j.created_at,DEFAULT_TZ):'Unknown'} · Expires: {j.expires_at?formatDateTime(j.expires_at,DEFAULT_TZ):'Not reported'}</Typography>{['queued','processing'].includes(j.status)&&<LinearProgress sx={{mt:1}}/>}{j.error&&<Alert severity="error" sx={{mt:1}}>{j.error}</Alert>}{j.status==='ready'&&j.download_url&&<Button component="a" href={j.download_url} size="small" variant="outlined" sx={{mt:1}}>Download</Button>}</Paper>)}
+   {serverJobs.map(j=><Paper key={j.id} variant="outlined" sx={{p:2,mb:1}}><Box sx={{display:'flex',gap:1,justifyContent:'space-between',flexWrap:'wrap'}}><Typography fontWeight={700}>{j.filename||j.id}</Typography><Chip color={j.status==='failed'?'error':j.status==='ready'?'success':'default'} label={j.status||'unknown'}/></Box><Typography variant="body2" color="text.secondary">Created: {j.created_at?formatDateTime(j.created_at,DEFAULT_TZ):'Unknown'} · Expires: {j.expires_at?formatDateTime(j.expires_at,DEFAULT_TZ):'Not reported'}</Typography>{['queued','processing'].includes(j.status)&&<LinearProgress sx={{mt:1}}/>}{j.error&&<Alert severity="error" sx={{mt:1}}>{j.error}</Alert>}{j.status==='ready'&&j.download_url&&<Button onClick={()=>downloadOutput(token,j).catch(e=>setError(e.message))} size="small" variant="outlined" sx={{mt:1}}>Download</Button>}</Paper>)}
   </FeaturePanel>
   <FeaturePanel title="This browser session's direct exports" detail="Local history only; no MP4s are stored here, and server download expiry is unknown">
    {!local.length&&<Alert severity="info">No exports have been requested from this browser session.</Alert>}

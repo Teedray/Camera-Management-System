@@ -22,7 +22,9 @@ export default function StoragePage(){
         {d.warnings?.map((w,i)=><Alert key={i} severity="warning" sx={{mt:1}}>{w.message||w}</Alert>)}
       </FeaturePanel>
       <FeaturePanel title="Approved retention period" detail="Changes take effect only after the server confirms the new policy.">
-        <Box component="form" onSubmit={save} sx={{display:'flex',gap:2,alignItems:'start',flexWrap:'wrap'}}><TextField label="Retain ordinary footage (days)" size="small" type="number" inputProps={{min:1,max:3650,step:1}} value={days} onChange={e=>setDays(e.target.value)} sx={{minWidth:230}}/><Button type="submit" variant="contained" disabled={busy||!snapshot?.supported}>Save retention policy</Button></Box>
+        <Typography>Local retention: {d.local_hours??"Unknown"} hours · Local variants removed: {d.local_removed??"Unknown"} · Cloud removals: {d.cloud_removed??"Unknown"}</Typography>
+        <Typography>Worker cleanup settings: local {d.local_cleanup==null?"unreported":d.local_cleanup?"enabled":"disabled"}, cloud {d.cloud_cleanup==null?"unreported":d.cloud_cleanup?"enabled":"disabled"}</Typography>
+        <Box component="form" onSubmit={save} sx={{display:'flex',gap:2,alignItems:'start',flexWrap:'wrap'}}><TextField label="Cloud retention (days)" size="small" type="number" inputProps={{min:1,max:3650,step:1}} value={days} onChange={e=>setDays(e.target.value)} sx={{minWidth:230}}/><Button type="submit" variant="contained" disabled={busy||!snapshot?.supported}>Save retention policy</Button></Box>
         {!snapshot?.supported&&<NotConnected name="Retention controls"/>}
       </FeaturePanel>
       <FeaturePanel title="Expiry, legal hold and active jobs">

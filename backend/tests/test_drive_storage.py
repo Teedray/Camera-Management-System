@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from smart_sec_cam.video.drive_storage import DriveStore
+from smart_sec_cam.video.drive_storage import DriveStore, drive_service
 import test_cloud_storage as fixtures
 from smart_sec_cam.video.cloud_storage import CloudQueue
 
@@ -89,6 +89,17 @@ class Download:
     def next_chunk(self, **kwargs):
         self.target.write(self.request.execute())
         return None, True
+
+
+class DriveTransportTests(unittest.TestCase):
+    def test_resumable_acknowledgment_reaches_upload_client(self):
+        with patch('google.oauth2.credentials.Credentials.from_authorized_user_file'), patch(
+                'googleapiclient.discovery.build') as build:
+            drive_service('unused.json')
+        transport = build.call_args.kwargs['http'].http
+        self.assertNotIn(308, transport.redirect_codes)
+        self.assertIn(301, transport.redirect_codes)
+        self.assertEqual(transport.timeout, 30)
 
 
 class DriveTests(unittest.TestCase):

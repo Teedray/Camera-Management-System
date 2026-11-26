@@ -1,5 +1,5 @@
 import { ApiError, request } from './client';
-import { USE_MOCK } from '../config';
+import { SERVER_URL, USE_MOCK } from '../config';
 import { mock } from './mockBackend';
 
 // Optional feature contract. The frontend never invents success when the server
@@ -65,4 +65,15 @@ export function explainUnsupported(e, label = 'This action') {
   if (absent(e)) return `${label} requires a corresponding backend endpoint; no change was saved.`;
   if (e instanceof ApiError) return e.message;
   return e?.message || 'Unexpected service error.';
+}
+
+export async function downloadOutput(token, job) {
+  const response = await fetch(SERVER_URL + job.download_url, {headers:{'x-access-token':token}});
+  if (!response.ok) throw new Error('Download unavailable. Refresh jobs and check camera access.');
+  const url = URL.createObjectURL(await response.blob());
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = job.filename.endsWith('.mp4') ? job.filename : job.filename + '.mp4';
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
 }

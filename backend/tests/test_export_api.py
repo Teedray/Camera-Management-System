@@ -109,6 +109,22 @@ class ExportApiTest(AdminApiTestCase):
                 self.assert_mp4(self.export(self.headers[role], filename), seconds=1.0)
                 self.assertEqual(self.source_hash(filename), before)
 
+    def test_history_download_revocation_and_expiry(self):
+        self.assert_mp4(self.export(self.headers["manager"]), seconds=1)
+        def history():
+            return self.client.get(EXPORTS_URL, headers=self.headers["manager"]).json["data"]["items"]
+        job, = history()
+        self.assert_mp4(self.client.get(job["download_url"], headers=self.headers["manager"]), seconds=1)
+        self.db.revoke_camera("manager-id", "front")
+        self.assertEqual(history(), [])
+        self.assertEqual(self.client.get(job["download_url"], headers=self.headers["manager"]).status_code, 404)
+        self.db.assign_camera("manager-id", "front")
+        with self.db.conn:
+            self.db.conn.execute("UPDATE media_jobs SET expires_at=? WHERE id=?",
+                                 ("2000-01-01T00:00:00+00:00",job["id"]))
+        self.assertEqual(history()[0]["status"], "expired")
+        self.assertFalse((self.root / ".outputs" / (job["id"] + ".mp4")).exists())
+
     def test_token_issued_before_demotion_loses_export_access(self):
         self.assert_mp4(self.export(self.headers["manager"]), seconds=1.0)
         self.export_calls.reset_mock()

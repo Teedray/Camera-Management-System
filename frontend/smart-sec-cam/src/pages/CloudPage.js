@@ -15,7 +15,7 @@ export default function CloudPage(){
   const admin=canManageSystem(me?.role);
   const refresh=React.useCallback(async()=>{setLoading(true);setError('');try{setSnapshot(await loadCloud(token));}catch(e){setError(e.message);}finally{setLoading(false);}},[token]);
   React.useEffect(()=>{if(ready&&admin)refresh();},[ready,admin,refresh]);
-  const run=async(fn)=>{setSaving(true);setError('');setMessage('');try{await fn();setMessage('Request completed by backend.');await refresh();}catch(e){setError(explainUnsupported(e,'Cloud management'));}finally{setSaving(false);}};
+  const run=async(fn)=>{setSaving(true);setError('');setMessage('');try{await fn();setMessage('Request completed.');await refresh();}catch(e){setError(explainUnsupported(e,'Cloud management'));}finally{setSaving(false);}};
   if(!ready)return null;
   const info=snapshot?.data||{}; const jobs=Array.isArray(info.jobs)?info.jobs:[];
   return <Layout token={token}>
@@ -26,12 +26,12 @@ export default function CloudPage(){
       {loading&&<LinearProgress sx={{mb:2}}/>}
       <InfoGrid items={[{label:'Connection',value:snapshot?.supported?info.connection_status||'Unknown':'Not connected to API'},
         {label:'Pending uploads',value:info.pending_uploads},{label:'Failed jobs',value:info.failed_uploads},{label:'Buffer usage',value:info.buffer_used_bytes != null?`${info.buffer_used_bytes} bytes`:null}]}/>
-      <FeaturePanel title="Cloud connection" detail="OAuth credentials must be handled on the server. Never paste Google Drive tokens into this form." action={<Button disabled={loading} onClick={refresh}>Refresh</Button>}>
+      <FeaturePanel title="Cloud connection" detail="Authorize Google Drive with the server drive_auth setup and configure the worker first. This control verifies the configured destination and resumes syncing." action={<Button disabled={loading} onClick={refresh}>Refresh</Button>}>
         {!snapshot?.supported && <NotConnected name="Cloud storage" detail="The connection controls are ready, but Google Drive OAuth and upload workers must be implemented on the backend."/>}
         <Box component="form" onSubmit={e=>{e.preventDefault();run(()=>connectCloud(token,{provider,folder}));}} sx={{display:'grid',gap:2,gridTemplateColumns:{xs:'1fr',sm:'1fr 1fr'},mt:2}}>
           <TextField label="Cloud provider" select value={provider} onChange={e=>setProvider(e.target.value)}><MenuItem value="google_drive">Google Drive</MenuItem><MenuItem value="other">Other configured provider</MenuItem></TextField>
           <TextField label="Destination folder identifier" value={folder} onChange={e=>setFolder(e.target.value)} helperText="Optional. Use a folder ID supplied by the service."/>
-          <Box sx={{display:'flex',gap:1,flexWrap:'wrap',gridColumn:{sm:'span 2'}}}><Button type="submit" variant="contained" disabled={saving||!snapshot?.supported}>Connect account</Button><Button color="error" variant="outlined" disabled={saving||!snapshot?.supported} onClick={()=>run(()=>disconnectCloud(token))}>Disconnect</Button></Box>
+          <Box sx={{display:'flex',gap:1,flexWrap:'wrap',gridColumn:{sm:'span 2'}}}><Button type="submit" variant="contained" disabled={saving||!snapshot?.supported}>Verify &amp; resume</Button><Button color="error" variant="outlined" disabled={saving||!snapshot?.supported} onClick={()=>run(()=>disconnectCloud(token))}>Pause syncing</Button></Box>
         </Box>
       </FeaturePanel>
       <FeaturePanel title="Upload queue" detail="Pending, uploading, verified and failed files, including retry attempts">
