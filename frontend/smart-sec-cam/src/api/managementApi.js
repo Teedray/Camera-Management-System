@@ -34,7 +34,6 @@ export const loadAudit = (token, params) => optionalFeature('GET', '/api/v1/audi
 export const loadMerges = token => optionalFeature('GET', '/api/v1/merges', token);
 export const createMerge = (token, body) => request('POST', '/api/v1/merges', token, { body });
 export const loadExportJobs = token => optionalFeature('GET', '/api/v1/exports', token);
-export const deleteProtectedIncident = (token, id) => request('DELETE', `/api/v1/incidents/${encodeURIComponent(id)}`, token);
 export const extendIncident = (token, id, body) => request('POST', `/api/v1/incidents/${encodeURIComponent(id)}/preservation`, token, { body });
 export const patchCamera = (token, id, body) => request('PATCH', `/api/v1/cameras/${encodeURIComponent(id)}`, token, { body });
 export async function listLegacyFiles(token, format = 'webm') {

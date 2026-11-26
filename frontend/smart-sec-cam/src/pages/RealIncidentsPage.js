@@ -2,8 +2,8 @@ import React from 'react';
 import { Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, LinearProgress, MenuItem, Paper, TextField, Typography } from '@mui/material';
 import Layout from '../components/Layout';import { FeaturePanel, RetryError } from '../components/FeaturePanel';
 import useAuth from '../hooks/useAuth';import useMe from '../hooks/useMe';
-import { incidentStreamUrl, listIncidents } from '../api/incidentsApi';
-import { deleteProtectedIncident, extendIncident, explainUnsupported } from '../api/managementApi';
+import { deleteIncident, incidentStreamUrl, listIncidents } from '../api/incidentsApi';
+import { extendIncident, explainUnsupported } from '../api/managementApi';
 import { canManageSystem } from '../utils/permissions';import { formatDateTime,DEFAULT_TZ } from '../utils/time';
 
 export default function RealIncidentsPage(){
@@ -13,7 +13,7 @@ export default function RealIncidentsPage(){
  const [loading,setLoading]=React.useState(true),[busy,setBusy]=React.useState(false),[error,setError]=React.useState(''),[notice,setNotice]=React.useState(''),[videoError,setVideoError]=React.useState('');
  const load=React.useCallback(async()=>{setLoading(true);setError('');try{const result=await listIncidents(token);setItems(result);}catch(e){setError(e.message);}finally{setLoading(false);}},[token]);
  React.useEffect(()=>{if(ready)load();},[ready,load]);
- async function remove(){if(!deleteTarget)return;setBusy(true);setError('');try{await deleteProtectedIncident(token,deleteTarget.id);setNotice('Clip deleted by backend.');setDeleteTarget(null);if(selected?.id===deleteTarget.id)setSelected(null);await load();}catch(e){setError(explainUnsupported(e,'Incident deletion'));setDeleteTarget(null);}finally{setBusy(false);}}
+ async function remove(){if(!deleteTarget)return;setBusy(true);setError('');try{await deleteIncident(token,deleteTarget.id);setNotice('Incident deleted.');setDeleteTarget(null);if(selected?.id===deleteTarget.id)setSelected(null);await load();}catch(e){setError(e.message);setDeleteTarget(null);}finally{setBusy(false);}}
  async function extend(){if(!preserveTarget)return;const n=Number(days);if(!Number.isInteger(n)||n<1||n>3650){setError('Choose a preservation extension between 1 and 3650 days.');return;}setBusy(true);setError('');try{await extendIncident(token,preserveTarget.id,{extend_days:n});setNotice('Preservation extended by backend.');setPreserveTarget(null);await load();}catch(e){setError(explainUnsupported(e,'Preservation extension'));setPreserveTarget(null);}finally{setBusy(false);}}
  if(!ready)return null;
  const shown=items.filter(i=>filter==='all'||(filter==='protected'?i.incident_flag||i.protected:!i.incident_flag&&!i.protected));
@@ -33,8 +33,8 @@ export default function RealIncidentsPage(){
     <Box component="video" key={selected.id} src={incidentStreamUrl(selected.id,token)} controls playsInline preload="metadata" onError={()=>setVideoError('The archived recording is unavailable or your camera access was revoked.')} sx={{width:'100%',maxWidth:1000,aspectRatio:'16/9',bgcolor:'#000',borderRadius:1}}/>
     {videoError&&<Alert severity="error" sx={{mt:1}}>{videoError}</Alert>}
   </FeaturePanel>}
-  <Alert severity="info">The current backend stores successful incident clips in a separate protected archive. It does not expose an asynchronous incident-job queue or preservation-extension/deletion routes. Those operations will report a server limitation until implemented.</Alert>
-  <Dialog open={Boolean(deleteTarget)} onClose={busy?undefined:()=>setDeleteTarget(null)}><DialogTitle>Delete protected incident?</DialogTitle><DialogContent><Typography>The clip “{deleteTarget?.title}” will be removed only if the backend permits deletion. This cannot be undone.</Typography></DialogContent><DialogActions><Button disabled={busy} onClick={()=>setDeleteTarget(null)}>Cancel</Button><Button color="error" variant="contained" disabled={busy} onClick={remove}>Confirm delete</Button></DialogActions></Dialog>
+  <Alert severity="info">Saved incident clips are kept in a separate protected archive. Preservation extensions are currently unavailable.</Alert>
+  <Dialog open={Boolean(deleteTarget)} onClose={busy?undefined:()=>setDeleteTarget(null)}><DialogTitle>Delete protected incident?</DialogTitle><DialogContent><Typography>The clip “{deleteTarget?.title}” will be permanently removed from the archive. This cannot be undone.</Typography></DialogContent><DialogActions><Button disabled={busy} onClick={()=>setDeleteTarget(null)}>Cancel</Button><Button color="error" variant="contained" disabled={busy} onClick={remove}>Confirm delete</Button></DialogActions></Dialog>
   <Dialog open={Boolean(preserveTarget)} onClose={busy?undefined:()=>setPreserveTarget(null)}><DialogTitle>Extend clip preservation</DialogTitle><DialogContent><TextField fullWidth type="number" label="Extend by days" value={days} onChange={e=>setDays(e.target.value)} inputProps={{min:1,max:3650}} sx={{mt:1}}/></DialogContent><DialogActions><Button disabled={busy} onClick={()=>setPreserveTarget(null)}>Cancel</Button><Button variant="contained" disabled={busy} onClick={extend}>Confirm extension</Button></DialogActions></Dialog>
  </Layout>;
 }

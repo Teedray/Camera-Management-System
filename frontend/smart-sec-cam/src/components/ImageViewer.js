@@ -25,7 +25,7 @@ export default function ImageViewer({room, token, isPreview=false, onStatus}){
   const watchdog=setInterval(()=>{if(mounted&&lastFrame.current&&Date.now()-lastFrame.current>15000)report('reconnecting');},5000);
   return()=>{mounted=false;clearInterval(watchdog);s.emit('leave',{room});s.off('image',image);s.disconnect();if(blobUrl.current)URL.revokeObjectURL(blobUrl.current);blobUrl.current=null;};
  },[room,token]);
- return <div className={`imageviewer ${isPreview?'preview':'main'}`} style={{position:'relative',minHeight:isPreview?90:320,background:'#070d16'}}>
+ return <div className={`imageviewer ${isPreview?'preview':'main'}`} style={{position:'relative',background:'#070d16'}}>
    {url&&<img src={url} alt={`${room} live camera feed`} style={{width:'100%',height:'100%',objectFit:'contain'}}/>}
    {(!url||state!=='live')&&<div role="status" style={{position:'absolute',inset:0,display:'grid',placeItems:'center',color:'#c9d5e7',fontSize:isPreview?11:15,background:'rgba(7,13,22,.70)',textAlign:'center',padding:10}}>
      {state==='denied'?'Camera access denied':state==='reconnecting'?'Feed interrupted — reconnecting…':state==='unavailable'?'Feed unavailable':'Connecting to stream…'}

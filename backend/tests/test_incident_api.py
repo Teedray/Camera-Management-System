@@ -172,6 +172,32 @@ class IncidentApiTest(AdminApiTestCase):
         self.assertEqual(response.status_code, 200)
         response.close()
 
+    def test_delete_requires_assigned_administrator_and_preserves_source(self):
+        target = self.save().get_json()["data"]
+        sibling = self.save(title="Keep this incident").get_json()["data"]
+        url = f"{INCIDENTS_URL}/{target['id']}"
+        archive_name, = self.db.conn.execute(
+            "SELECT filename FROM incident_clips WHERE id=?", (target["id"],)
+        ).fetchone()
+        self.assertEqual(self.client.delete(url).status_code, 401)
+        for role in ("viewer", "manager"):
+            self.assertEqual(self.client.delete(url, headers=self.headers[role]).status_code, 403)
+        admin = self.headers["administrator"]
+        self.assertEqual(self.client.delete(url, headers=admin).status_code, 404)
+        self.db.assign_camera("administrator-id", "front")
+        with patch.object(Path, "unlink", side_effect=PermissionError):
+            self.assertEqual(self.client.delete(url, headers=admin).status_code, 500)
+        self.assertTrue((self.archive / archive_name).is_file())
+        self.assertEqual(self.client.delete(url, headers=admin).status_code, 200)
+        self.assertFalse((self.archive / archive_name).exists())
+        self.assertEqual(self.client.delete(url, headers=admin).status_code, 404)
+        self.assertEqual(self.client.get(target["video_url"], headers=admin).status_code, 404)
+        items = self.client.get(INCIDENTS_URL, headers=admin).get_json()["data"]["items"]
+        self.assertEqual([item["id"] for item in items], [sibling["id"]])
+        for path in (sibling["video_url"], "/api/video/" + self.front):
+            with self.client.get(path, headers=admin) as response:
+                self.assertEqual(response.status_code, 200)
+
     def test_endpoints_require_authentication(self):
         for method, url in (
             ("post", INCIDENTS_URL), ("get", INCIDENTS_URL),

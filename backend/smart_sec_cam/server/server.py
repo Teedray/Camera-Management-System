@@ -1049,6 +1049,37 @@ def get_incident(incident_id):
     return jsonify(success=True, data=incident_profile(incident)), 200
 
 
+@app.route("/api/v1/incidents/<incident_id>", methods=["DELETE"])
+@require_administrator
+def delete_incident(incident_id):
+    incident = visible_incident(g.current_user.user_id, incident_id)
+    if incident is None:
+        return jsonify(success=False, error="Incident does not exist"), 404
+
+    filename = incident["filename"]
+    if not filename or Path(filename).name != filename or filename in (".", ".."):
+        return jsonify(success=False, error="Invalid archive filename"), 409
+
+    conn = auth_db.conn
+    try:
+        with conn:
+            removed = conn.execute(
+                "DELETE FROM incident_clips WHERE id = ? AND filename = ?",
+                (incident_id, filename)
+            ).rowcount
+            if not removed:
+                return jsonify(success=False, error="Incident does not exist"), 404
+            shared = conn.execute(
+                "SELECT 1 FROM incident_clips WHERE filename = ? LIMIT 1", (filename,)
+            ).fetchone()
+            if not shared:
+                (Path(INCIDENT_ARCHIVE_DIR) / filename).unlink(missing_ok=True)
+    except (OSError, sqlite3.Error):
+        app.logger.exception("Failed to delete archived incident %s", incident_id)
+        return jsonify(success=False, error="Could not complete incident deletion"), 500
+    return jsonify(success=True, data={"id": incident_id}), 200
+
+
 @app.route("/api/v1/incidents/<incident_id>/video", methods=["GET"])
 def get_incident_video(incident_id):
     token = (

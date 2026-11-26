@@ -57,7 +57,10 @@ class Streamer:
         global shutdown
         print("Started image sending thread.")
         while not shutdown:
-            image_data = self.image_queue.get()
+            try:
+                image_data = self.image_queue.get(timeout=1)
+            except queue.Empty:
+                continue
             try:
                 self.image_sender.send_message(image_data)
             except redis.exceptions.ConnectionError:

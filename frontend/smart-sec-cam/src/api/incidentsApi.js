@@ -1,5 +1,5 @@
 import { USE_MOCK } from "../config";
-import { ApiError, mediaUrl, request } from "./client";
+import { mediaUrl, request } from "./client";
 import { mock } from "./mockBackend";
 
 export async function createIncident(token, body) {
@@ -19,7 +19,7 @@ export async function listIncidents(token) {
 }
 export async function deleteIncident(token, id) {
   if (USE_MOCK) return mock.deleteIncident(id);
-  throw new ApiError("Incident deletion isn't supported by the backend.");
+  return request("DELETE", `/api/v1/incidents/${encodeURIComponent(id)}`, token);
 }
 export function incidentStreamUrl(id, token, format = "mp4") {
   if (USE_MOCK) return `${process.env.PUBLIC_URL || ""}/mock/sample.webm`;
